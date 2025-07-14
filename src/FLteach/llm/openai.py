@@ -1,4 +1,6 @@
 import os
+from typing import Sequence, Tuple
+
 from openai import OpenAI
 
 from FLteach.llm.llm import ILargeLanguageModel
@@ -22,15 +24,21 @@ class OpenaiApi(ILargeLanguageModel):
         return
 
     def call(self,
-             system_prompt: str,
              user_prompt: str,
-             history: 
+             system_prompt: str = "You are a helpful assistant.",
+             history: Sequence[Tuple[str, str]] | None = None,
              ) -> str:
+        history = [] if history is None else history
+        conversation_history = []
+        for turn in history:
+            conversation_history.append({"role": "user", "content": turn[0]})
+            conversation_history.append({"role": "assistant", "content": turn[1]})
         # prepare the model input
         messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+            {"role": "system", "content": system_prompt},
+            *conversation_history,
+            {"role": "user", "content": user_prompt}
+        ]
 
         completion = self.client.chat.completions.create(
             model=self.model_id,
