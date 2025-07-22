@@ -14,7 +14,7 @@ class OpenaiApi(ILargeLanguageModel):
         Initializes the openai api class with the due model id and api key
         """
         if api_key_or_path is not None and os.path.isfile(api_key_or_path):
-            self.api_key = api_key_or_path
+            self.api_key = open(api_key_or_path).read()
         elif isinstance(api_key_or_path, str):
             self.api_key = api_key_or_path
         else:

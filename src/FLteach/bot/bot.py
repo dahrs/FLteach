@@ -3,15 +3,15 @@ from abc import ABC, abstractmethod
 
 class IBot(ABC):
     @abstractmethod
-    def send(self, chat_id: int, message_content: str) -> str:
+    def initialize_bot(self) -> None:
         """
-        Sends a message from the user in the chat
+        Initializes the bot with the necessary configurations
         """
         raise NotImplementedError
 
     @abstractmethod
-    def get(self) -> str:
+    def run(self) -> None:
         """
-        Gets the reply from the bot in the chat
+        Runs the bot, starting the main loop to listen for messages
         """
         raise NotImplementedError
