@@ -167,6 +167,7 @@ class TelegramBot(IBot):
         Registers the message handlers for the bot.
         """
         self.bot.message_handler(commands=['start', 'restart'])(self._handle_start_command)
+        # TODO info handlers should not be chained to one another check and correct ######################################
         self.bot.message_handler(commands=['language'])(self._handle_language_command)
         self.bot.message_handler(commands=['level'])(self._handle_level_command)
         self.bot.message_handler(commands=['limitation'])(self._handle_limitation_command)
@@ -180,6 +181,7 @@ class TelegramBot(IBot):
         self.bot.message_handler(commands=['better'])(self._handle_better_explanation_command)
         self.bot.message_handler(commands=['question'])(self._handle_question_command)
         self.bot.message_handler(commands=['conversation'])(self._handle_conversation_command)
+        self.bot.message_handler(commands=['data'])(self._handle_data_command)
         self.bot.message_handler(commands=['help', 'info', 'documentation'])(self._handle_help_command)
         self.bot.message_handler(func=lambda message: True)(self._handle_all_messages)
 
@@ -272,41 +274,6 @@ class TelegramBot(IBot):
             self._clean_mastered(chat_id)  # Ensure this operates on user-specific data if needed
             logging.info(f"Inferred seen content for {chat_id}.")
 
-            self.user_states[chat_id]['step'] = 'awaiting_limitation'
-            self.bot.send_message(
-                chat_id,
-                "Do you have any physical/cognitive/psychological/emotional/other limitations of which I should be "
-                "aware?"
-                "If you are unsure, you can shortly describe what you struggle with in a learning environment."
-            )
-            self.bot.register_next_step_handler(message, self._process_limitation_input)
-            logging.info(f"Set next step for {chat_id} to _process_limitation_input.")
-        except Exception as err:
-            logging.error(f"Error processing level for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that level. Please try again.")
-
-    def _process_limitation_input(self, message: telebot.types.Message) -> None:
-        """
-        Processes limitation input and asks for lesson preference.
-        """
-        chat_id = message.chat.id
-        user_message = message.text
-        if not user_message or user_message.startswith('/'):
-            self.bot.send_message(chat_id, "Please provide any limitations or type 'None'. Try /start again.")
-            return
-
-        try:
-            user_message_summary = self.model.call(
-                user_prompt=f"This is the answer to the question 'do you have any limitation that restrains how a language "
-                            f"class might unfold?'. Output the clinical term of any limitation along with any necessary "
-                            f"details (use as few words as possible to summarize all concepts): {user_message}",
-                system_prompt="You are a succinct extractor and format standardizer."
-            )
-            self.limitation = user_message_summary # This will be overwritten by next user if not careful
-            self.user_states[chat_id]['limitation'] = user_message_summary
-            self.bot.send_message(chat_id, f"Acknowledged. Your limitations: {user_message_summary}")
-            logging.info(f"Limitation set for {chat_id}: {user_message_summary}")
-
             self.user_states[chat_id]['step'] = 'awaiting_lesson_preference'
             self.bot.send_message(
                 chat_id,
@@ -315,9 +282,10 @@ class TelegramBot(IBot):
             )
             self.bot.register_next_step_handler(message, self._process_lesson_preference_input)
             logging.info(f"Set next step for {chat_id} to _process_lesson_preference_input.")
+
         except Exception as err:
-            logging.error(f"Error processing limitation for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that limitation. Please try again.")
+            logging.error(f"Error processing level for {chat_id}: {err}", exc_info=True)
+            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that level. Please try again.")
 
     def _process_lesson_preference_input(self, message: telebot.types.Message) -> None:
         """
@@ -335,7 +303,7 @@ class TelegramBot(IBot):
                             f"details specified (use as few words as possible to summarize all concepts): {user_message}",
                 system_prompt="You are a succinct extractor and format standardizer."
             )
-            self.next_lesson = user_message_summary # This will be overwritten by next user if not careful
+            self.next_lesson = user_message_summary  # This will be overwritten by next user if not careful
             self.user_states[chat_id]['next_lesson'] = user_message_summary
             self.bot.send_message(chat_id, f"Okay, your initial lesson preference is: {user_message_summary}")
             logging.info(f"Lesson preference set for {chat_id}: {user_message_summary}")
@@ -362,7 +330,7 @@ class TelegramBot(IBot):
             self.bot.send_message(chat_id, "Please type 'yes' or 'no'. Or try /start again.")
             return
 
-        if '/yes' in user_choice or 'yes' in user_choice:
+        if 'yes' in user_choice:
             self.user_states[chat_id]['step'] = 'awaiting_learned_languages'
             self.bot.send_message(
                 chat_id,
@@ -375,10 +343,10 @@ class TelegramBot(IBot):
             # Skip optional questions, proceed to start lesson
             self.bot.send_message(chat_id, "Okay, skipping the additional questions. Let's start your lesson!")
             logging.info(f"Skipping optional questions for {chat_id}.")
-            self._start_lesson_flow(message) # Directly call the lesson start
+            self._start_lesson_flow(message)  # Directly call the lesson start
         else:
             self.bot.send_message(chat_id, "Invalid choice. Please type 'yes' or 'no'.")
-            self.bot.register_next_step_handler(message, self._process_optional_questions_choice) # Ask again
+            self.bot.register_next_step_handler(message, self._process_optional_questions_choice)  # Ask again
             logging.warning(f"Invalid optional questions choice from {chat_id}: {user_choice}. Asking again.")
 
     def _process_learned_languages_input(self, message: telebot.types.Message) -> None:
@@ -396,7 +364,7 @@ class TelegramBot(IBot):
                                        prompt_intro="This is a sentence listing languages you already know. Extract all "
                                                     "the languages mentioned.",
                                        )
-            self.learned_languages = lang_list # This will be overwritten by next user if not careful
+            self.learned_languages = lang_list  # This will be overwritten by next user if not careful
             self.user_states[chat_id]['learned_languages'] = lang_list
             self.bot.send_message(chat_id, f"Got it. You know: {', '.join(lang_list)}.")
             logging.info(f"Learned languages set for {chat_id}: {lang_list}")
@@ -435,11 +403,51 @@ class TelegramBot(IBot):
                                                     f"any necessary details). If not already done, translate them to "
                                                     f"{self.user_states[chat_id]['language']}",
                                        )
-            self.mastered += user_list # This will be overwritten by next user if not careful
+            self.mastered += user_list  # This will be overwritten by next user if not careful
             self.user_states[chat_id]['mastered'] = self.user_states[chat_id].get('mastered', []) + user_list
-            self._clean_mastered(chat_id) # Clean mastered content based on errors
+            self._clean_mastered(chat_id)  # Clean mastered content based on errors # TODO check if necessary #################################
             self.bot.send_message(chat_id, f"Acknowledged. Mastered content added.")
             logging.info(f"Mastered content set for {chat_id}.")
+
+            self.user_states[chat_id]['step'] = 'awaiting_limitation'
+            self.bot.send_message(
+                chat_id,
+                "Do you have any physical/cognitive/psychological/emotional/other limitations of which I should "
+                "be aware? "
+                "This includes but is not limited to sight impairment, hearing impairment, talking impairment, "
+                "phobia, ADHD, anxiety, dyslexia, cognitive impairment, PTSD. "
+                "If you are unsure, you can shortly describe what you struggle with in a learning "
+                "environment or type 'no' if you have none."
+            )
+            self.bot.register_next_step_handler(message, self._process_limitation_input)
+            logging.info(f"Set next step for {chat_id} to _process_limitation_input.")
+        except Exception as err:
+            logging.error(f"Error processing mastered content for {chat_id}: {err}", exc_info=True)
+            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that. Please try /start again.")
+
+    def _process_limitation_input(self, message: telebot.types.Message) -> None:
+        """
+        Processes limitation input and asks for lesson preference.
+        """
+        chat_id = message.chat.id
+        user_message = message.text
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(chat_id, "Please provide any limitations or type 'None'. Try /start again.")
+            return
+
+        try:
+            user_message_summary = self.model.call(
+                user_prompt=f"This is the answer to the question 'do you have any limitation that restrains how a "
+                            f"language class might unfold?'. Output the clinical term of any limitation(s) along with "
+                            f"any necessary details (use as few words as possible to summarize all concepts): "
+                            f"{user_message}",
+                system_prompt="You are a succinct extractor and format standardizer."
+            )
+            # TODO overwritting ##########################################
+            self.limitation = user_message_summary  # This will be overwritten by next user if not careful
+            self.user_states[chat_id]['limitation'] = user_message_summary
+            self.bot.send_message(chat_id, f"Acknowledged. Your limitations: {user_message_summary}")
+            logging.info(f"Limitation set for {chat_id}: {user_message_summary}")
 
             self.user_states[chat_id]['step'] = 'awaiting_reminder_time'
             self.bot.send_message(
@@ -451,8 +459,8 @@ class TelegramBot(IBot):
             self.bot.register_next_step_handler(message, self._process_reminder_time_input)
             logging.info(f"Set next step for {chat_id} to _process_reminder_time_input.")
         except Exception as err:
-            logging.error(f"Error processing mastered content for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that. Please try /start again.")
+            logging.error(f"Error processing limitation for {chat_id}: {err}", exc_info=True)
+            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that limitation. Please try again.")
 
     def _process_reminder_time_input(self, message: telebot.types.Message) -> None:
         """
@@ -471,35 +479,35 @@ class TelegramBot(IBot):
                 system_prompt="You are a succinct extractor and format standardizer."
             )
             if "None" in user_message_summary:
-                self.reminder_time = None # This will be overwritten by next user if not careful
+                self.reminder_time = None  # This will be overwritten by next user if not careful
                 self.user_states[chat_id]['reminder_time'] = None
                 self.bot.send_message(chat_id, "Reminder skipped.")
                 logging.info(f"Reminder skipped for {chat_id}.")
             else:
                 parsed_time = parser.parse(user_message_summary).strftime("%H:%M")
-                self.reminder_time = parsed_time # This will be overwritten by next user if not careful
+                self.reminder_time = parsed_time  # This will be overwritten by next user if not careful
                 self.user_states[chat_id]['reminder_time'] = parsed_time
-                # Schedule the reminder using functools.partial to pass chat_id
-                # The job will be stored in a user-specific way if needed for cancellation
+                # Schedule the reminder, job will be stored in a user-specific way if needed for cancellation
                 job = schedule.every().day.at(parsed_time).do(
                     partial(self._send_reminder_callback, chat_id)
                 )
+                # TODO check if true ############################################################
                 # Store job object if you want to cancel it later for this user
                 # For simplicity, if multiple users set reminders for the same time,
                 # schedule will create multiple jobs. If you need to track per-user jobs,
                 # you'd need a more complex structure in self.reminders.
                 # For now, let's assume reminder_job is for the current user's last set reminder.
-                self.reminder_job = job # This will be overwritten by next user if not careful
+                self.reminder_job = job  # This will be overwritten by next user if not careful
                 self.bot.send_message(chat_id, f"Daily reminder set for {parsed_time} UTC!")
                 logging.info(f"Reminder set for {chat_id} at {parsed_time}.")
 
             self.user_states[chat_id]['step'] = 'setup_complete'
             self.bot.send_message(chat_id, "Setup complete! Let's start your first lesson.")
             logging.info(f"Setup complete for {chat_id}.")
-            self._start_lesson_flow(message) # Proceed to start the lesson
+            self._start_lesson_flow(message)  # Proceed to start the lesson
         except ValueError:
             self.bot.send_message(chat_id, "Invalid time format. Please use HH:MM UTC (e.g., 14:30) or type 'no'.")
-            self.bot.register_next_step_handler(message, self._process_reminder_time_input) # Ask again
+            self.bot.register_next_step_handler(message, self._process_reminder_time_input)  # Ask again
             logging.warning(f"Invalid reminder time format from {chat_id}: {user_message}. Asking again.")
         except Exception as err:
             logging.error(f"Error processing reminder time for {chat_id}: {err}", exc_info=True)
@@ -526,7 +534,6 @@ class TelegramBot(IBot):
         # Directly call _handle_new_lesson_command as if user typed /new
         # We need to pass the current message to it.
         self._handle_new_lesson_command(message)
-
 
     # --- Command Handlers (can be called directly by user at any time) ---
 
@@ -572,7 +579,6 @@ class TelegramBot(IBot):
         self.bot.register_next_step_handler(message, self._process_reminder_time_input) # Reuse existing processor
         logging.info(f"User {chat_id} initiated /reminder command.")
 
-
     def _clean_mastered(self, chat_id: int) -> None:
         """
         Given the newly learned content and the lesson errors, updates the mastered content.
@@ -581,7 +587,7 @@ class TelegramBot(IBot):
         user_seen_content = self.user_states[chat_id].get('seen_content', [])
         user_lesson_errors = self.user_states[chat_id].get('lesson_errors', [])
         user_mastered = self.user_states[chat_id].get('mastered', [])
-        user_language = self.user_states[chat_id].get('language', 'English') # Default for LLM prompt
+        user_language = self.user_states[chat_id].get('language', 'English')  # Default for LLM prompt
 
         try:
             user_list = self.text2list(
@@ -597,7 +603,6 @@ class TelegramBot(IBot):
             logging.info(f"Mastered content cleaned for {chat_id}.")
         except Exception as err:
             logging.error(f"Error cleaning mastered content for {chat_id}: {err}", exc_info=True)
-
 
     def _send_reminder_callback(self, chat_id: int) -> None:
         """
@@ -985,15 +990,31 @@ class TelegramBot(IBot):
             logging.error(f"Error starting conversation for {chat_id}: {err}", exc_info=True)
             self.bot.send_message(chat_id, "Sorry, I couldn't start a conversation. Please try again.")
 
+    def _handle_data_command(self, message: telebot.types.Message) -> None:
+        """
+        Handles the '/data' command, providing the personal data about the user.
+        """
+        chat_id = message.chat.id
+        data_text = (
+            f"Here is the data that you provided:\n\n"
+            f"📌 Language - {self.language}\n"
+            f"📌 Level - {self.level}\n"
+            f"📌 Personal limitations - {self.limitation}\n"
+            f"📌 Previously studied languages - {', '.join(self.learned_languages)}\n"
+            f"📌 Daily reminder - {self.reminder_time}\n"
+            f"📌 Mastered content - {', '.join(self.mastered)}\n"
+            f"📌 Previously studied lessons - {', '.join(self.seen_content)}\n"
+        )
+        self.bot.send_message(chat_id, data_text)
+        logging.info(f"Sent /data to chat ID: {chat_id}")
 
     def _handle_help_command(self, message: telebot.types.Message) -> None:
         """
-        Handles the '/help' command, providing a list and explanation of available commands.
+        Handles the '/help', '/info', '/documentation' command, providing a list and explanation of available commands.
         """
         chat_id = message.chat.id
         help_text = (
             "Here are the commands you can use:\n\n"
-            "📌 /start or /restart - Begin or restart the language learning setup.\n"
             "📌 /language - Change the language you are learning.\n"
             "📌 /level - Update your language proficiency level.\n"
             "📌 /limitation - Update any learning limitations.\n"
@@ -1001,12 +1022,14 @@ class TelegramBot(IBot):
             "📌 /learned - List languages you already know.\n"
             "📌 /mastered - List content you've already mastered.\n"
             "📌 /reminder - Set or change your daily study reminder time.\n\n"
+            "📌 /start or /restart - Begin or restart the language learning setup.\n"
             "    📌 /new - Start a brand new lesson.\n"
             "    📌 /next - Move to the next section of the current lesson.\n"
             "    📌 /more - Get more details on the current lesson content.\n"
             "    📌 /better - Get a simpler explanation of the current content.\n"
             "    📌 /question - Ask a question about the current lesson.\n"
             "📌 /conversation - Start a conversation practice related to the lesson.\n\n"
+            "📌 /data - Shows the data used to tailor the lessons to your needs.\n\n"
             "📌 /help or /info or /documentation - Show this list of commands."
         )
         self.bot.send_message(chat_id, help_text)
