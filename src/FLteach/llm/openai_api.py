@@ -49,6 +49,5 @@ class OpenaiApi(ILargeLanguageModel):
             messages=messages,
             **kwargs
         )
-        print(11111111111111111111111111111111111, completion.usage.completion_tokens)
         content = completion.choices[0].message.content
         return content

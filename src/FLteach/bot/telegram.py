@@ -30,6 +30,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
                     datefmt='%Y-%m-%d %H:%M:%S')
 
 
+# TODO: homework and error update
+# TODO: solo /lesson /language /level etc handlers
+# 
+
 class TelegramBot(IBot):
     """
     A simple Telegram bot class that uses the Telebot library.
@@ -221,7 +225,7 @@ class TelegramBot(IBot):
                 system_prompt="You are a succinct extractor and format standardizer.",
             )
             # TODO below comment + ask for level if in /setup only##############################################
-            self.language = user_message_summary # This will be overwritten by next user if not careful in multi-user setup
+            self.language = user_message_summary
             # For multi-user, store in user_states: self.user_states[chat_id]['language'] = user_message_summary
             self.user_states[chat_id]['language'] = user_message_summary
             self.bot.send_message(chat_id, f"Great! You want to learn {user_message_summary}")
@@ -257,7 +261,7 @@ class TelegramBot(IBot):
                             f"to summarize all concepts): {user_message}",
                 system_prompt="You are a succinct extractor and format standardizer."
             )
-            self.level = user_message_summary # This will be overwritten by next user if not careful in multi-user setup
+            self.level = user_message_summary
             self.user_states[chat_id]['level'] = user_message_summary
             self.bot.send_message(chat_id, f"Understood, your level is {user_message_summary}\n\nGive me a second...")
             logging.info(f"Level set for {chat_id}: {user_message_summary}")
@@ -268,8 +272,7 @@ class TelegramBot(IBot):
                             f"that a foreign language student should already know?",
                 system_prompt="You are a succinct assistant."
             )
-            # TODO overwritting ##########################################
-            self.seen_content = [infered_master_content]  # This will be overwritten by next user if not careful
+            self.seen_content = [infered_master_content]
             self.user_states[chat_id]['seen_content'] = [infered_master_content]
             self._clean_mastered(chat_id)  # Ensure this operates on user-specific data if needed
             logging.info(f"Inferred seen content for {chat_id}.")
@@ -310,7 +313,7 @@ class TelegramBot(IBot):
                 max_line_length=None,
                 normalize_whitespace=False
             )
-            self.next_lesson = llm_output  # This will be overwritten by next user if not careful
+            self.next_lesson = llm_output
             self.user_states[chat_id]['next_lesson'] = llm_output
             self.bot.send_message(chat_id, f"Okay, your initial lesson will be:\n{llm_output_converted}")
             logging.info(f"Lesson preference set for {chat_id}: {llm_output}")
@@ -371,7 +374,7 @@ class TelegramBot(IBot):
                                        prompt_intro="This is a sentence listing languages you already know. Extract all "
                                                     "the languages mentioned.",
                                        )
-            self.learned_languages = lang_list  # This will be overwritten by next user if not careful
+            self.learned_languages = lang_list
             self.user_states[chat_id]['learned_languages'] = lang_list
             self.bot.send_message(chat_id, f"Got it. You know: {', '.join(lang_list)}.")
             logging.info(f"Learned languages set for {chat_id}: {lang_list}")
@@ -412,7 +415,7 @@ class TelegramBot(IBot):
                                                     f"any necessary details). Everything must be written in "
                                                     f"{self.user_states[chat_id]['language']}",
                                        )
-            self.mastered += user_list  # This will be overwritten by next user if not careful
+            self.mastered += user_list
             self.user_states[chat_id]['mastered'] = self.user_states[chat_id].get('mastered', []) + user_list
             self._clean_mastered(chat_id)  # Clean mastered content based on errors # TODO check if necessary #################################
             self.bot.send_message(chat_id, f"Acknowledged. Mastered content added.")
@@ -454,8 +457,7 @@ class TelegramBot(IBot):
                             f"{user_message}",
                 system_prompt="You are a succinct extractor and format standardizer."
             )
-            # TODO overwritting ##########################################
-            self.limitation = user_message_summary  # This will be overwritten by next user if not careful
+            self.limitation = user_message_summary
             self.user_states[chat_id]['limitation'] = user_message_summary
             self.bot.send_message(chat_id, f"Acknowledged. Your limitations: {user_message_summary}")
             logging.info(f"Limitation set for {chat_id}: {user_message_summary}")
@@ -491,13 +493,13 @@ class TelegramBot(IBot):
                 system_prompt="You are a succinct extractor and format standardizer."
             )
             if "None" in user_message_summary:
-                self.reminder_time = None  # This will be overwritten by next user if not careful
+                self.reminder_time = None
                 self.user_states[chat_id]['reminder_time'] = None
                 self.bot.send_message(chat_id, "Reminder skipped.")
                 logging.info(f"Reminder skipped for {chat_id}.")
             else:
                 parsed_time = parser.parse(user_message_summary).strftime("%H:%M")
-                self.reminder_time = parsed_time  # This will be overwritten by next user if not careful
+                self.reminder_time = parsed_time
                 self.user_states[chat_id]['reminder_time'] = parsed_time
                 # Schedule the reminder, job will be stored in a user-specific way if needed for cancellation
                 job = schedule.every().day.at(parsed_time).do(
@@ -509,7 +511,7 @@ class TelegramBot(IBot):
                 # schedule will create multiple jobs. If you need to track per-user jobs,
                 # you'd need a more complex structure in self.reminders.
                 # For now, let's assume reminder_job is for the current user's last set reminder.
-                self.reminder_job = job  # This will be overwritten by next user if not careful
+                self.reminder_job = job
                 self.bot.send_message(chat_id, f"Daily reminder set for {parsed_time} UTC!")
                 logging.info(f"Reminder set for {chat_id} at {parsed_time}.")
 
@@ -690,14 +692,14 @@ class TelegramBot(IBot):
                 logging.error(f"LLM returned empty lesson_content_list for {chat_id}.")
                 return
 
-            self.lesson_sections = lesson_content_list # This will be overwritten by next user if not careful
+            self.lesson_sections = lesson_content_list
             self.user_states[chat_id]['lesson_sections'] = lesson_content_list
             self.bot.send_message(chat_id, f"We are preparing your lesson.\n"
                                            f"Wait for a moment please...")
             logging.info(f"New lesson '{current_lesson_name}' started for {chat_id}.")
 
             # Update seen_content with the new lesson topic
-            self.seen_content.append(current_lesson_name)  # This will be overwritten by next user if not careful
+            self.seen_content.append(current_lesson_name)
             self.user_states[chat_id]['seen_content'] = self.user_states[chat_id].get('seen_content', []) + [current_lesson_name]
 
             # Determine the next lesson topic for future use
@@ -707,7 +709,7 @@ class TelegramBot(IBot):
                             f"learned about the following:\n{', '.join(self.user_states[chat_id]['seen_content'])}",
                 system_prompt=f"You are a succinct language teacher assistant",
             )
-            self.next_lesson = next_lesson_topic  # This will be overwritten by next user if not careful
+            self.next_lesson = next_lesson_topic
             self.user_states[chat_id]['next_lesson'] = next_lesson_topic
             logging.info(f"Next lesson determined for {chat_id}: {next_lesson_topic}")
 
@@ -771,8 +773,8 @@ class TelegramBot(IBot):
                             f"Previous lessons: {', '.join(user_seen_content)}\n"
                             f"Mastered content: {', '.join(user_mastered)}\n",
                 system_prompt=f"You are a great foreign language teacher teaching a 1-on-1 {course_language} class ",
-                history=self.lesson_history  # Pass history for conversational context
-                # max_tokens=3000,  # Limit the response length # TODO check if necessary to save time ##############################
+                history=self.lesson_history 
+                # max_tokens=3000,  # Limit the response length
             )
             self.bot.send_message(chat_id, "⏳ Halfway done...")
             lesson_content = self.model.call(
@@ -785,8 +787,7 @@ class TelegramBot(IBot):
                             f"CLASS:\n{lesson_content}\n",
                 system_prompt=f"You are a foreign language teacher that uses a textual medium to teach their class. "
                               f"Use raw markdown formatting.",
-                history=self.lesson_history  # Pass history for conversational context
-                # max_tokens=3000,  # Limit the response length # TODO check if necessary to save time ##############################
+                history=self.lesson_history 
             )
             self.bot.send_message(chat_id, "⌛ Almost done...")
             lesson_content = self.model.call(
@@ -801,8 +802,7 @@ class TelegramBot(IBot):
                 system_prompt=f"You are a {course_language} teacher adapting his a lesson to its student's profile."
                               f"Structure must be clean and simple, foreigner-friendly and kid-friendly. "
                               f"Use raw markdown formatting.",
-                history=self.lesson_history  # Pass history for conversational context
-                # max_tokens=3000,  # Limit the response length # TODO check if necessary to save time ##############################
+                history=self.lesson_history 
             )
             converted_content = telegramify_markdown.markdownify(
                 lesson_content,
@@ -844,10 +844,10 @@ class TelegramBot(IBot):
                             f"If necessary to make comparisons or to guide their pronunciation, the student also "
                             f"speaks {', '.join(user_data.get('learned_languages', ['English']))}.\n "
                             f"Your student asks you to give more details and "
-                            f"go deeper into the subject of your last lesson:\n{self.lesson_history[-2]['content']}", # Refer to previous bot message
+                            f"go deeper into the subject of your last lesson:\n{self.lesson_history[-2]['content']}",
                 system_prompt=f"You are a great foreign language teacher teaching a 1-on-1 {user_language} class "
                               f"through a textual medium, such as a messaging app. Use raw markdown formatting.",
-                history=self.lesson_history,  # Pass history for conversational context
+                history=self.lesson_history, 
             )
             converted_content = telegramify_markdown.markdownify(
                 lesson_content,
@@ -888,10 +888,10 @@ class TelegramBot(IBot):
                             f"speaks {', '.join(user_data.get('learned_languages', ['English']))}.\n "
                             f"Your student did not understand your last message."
                             f"Try to explain it in a simpler and clearer way, with more and simpler examples:\n"
-                            f"{self.lesson_history[-2]['content']}", # Refer to previous bot message
+                            f"{self.lesson_history[-2]['content']}", 
                 system_prompt=f"You are a great foreign language teacher teaching a 1-on-1 {user_language} class "
                               f"through a textual medium, such as a messaging app. Use raw markdown formatting.",
-                history=self.lesson_history, # Pass history for conversational context
+                history=self.lesson_history, 
             )
             converted_content = telegramify_markdown.markdownify(
                 lesson_content,
@@ -958,10 +958,10 @@ class TelegramBot(IBot):
                 user_prompt=f"You are teaching a {user_language} class in writing form. Your student has a question "
                             f"about the last lesson section. Please reply and explain it in the easiest way to "
                             f"understand.\nQUESTION: {user_question}\n\n"
-                            f"LESSON SECTION: {self.lesson_history[-3]['content']}", # Refer to bot's last lesson content
+                            f"LESSON SECTION: {self.lesson_history[-3]['content']}",
                 system_prompt=f"You are a great foreign language teacher teaching a 1-on-1 {user_language} class "
                               f"through a textual medium, such as a messaging app. Use raw markdown formatting.",
-                history=self.lesson_history, # Pass history for conversational context
+                history=self.lesson_history,
             )
             converted_content = telegramify_markdown.markdownify(
                 question_answer,
@@ -1036,7 +1036,7 @@ class TelegramBot(IBot):
                             f"Adjust your language level to the other person's level: {user_level}. "
                             f"The conversation must treat the topics of: {self.lesson_history[-3]['content']}",
                 system_prompt=f"You are a person interested in starting a conversation.",
-                history=self.lesson_history,  # Pass history for conversational context
+                history=self.lesson_history, 
             )
             converted_content = telegramify_markdown.markdownify(
                 conversation_starter,
@@ -1083,7 +1083,7 @@ class TelegramBot(IBot):
                             f"Adjust your language level to the other person's level: {user_level}.{leitmotiv}",
                 system_prompt=f"You are a curious person, you are not excessively chatty but you are interested in "
                               f"having a conversation. Your phraseology is very natural, native and oral-like.",
-                history=self.lesson_history,  # Pass history for conversational context
+                history=self.lesson_history, 
             )
             converted_conversation_follow_up = telegramify_markdown.markdownify(
                 conversation_follow_up,
