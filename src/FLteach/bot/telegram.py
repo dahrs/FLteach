@@ -1,13 +1,14 @@
 import re
 import os
 import json
-import random
-import datetime
 import time
+import random
 import logging
 import threading
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
+
+import requests.exceptions
 from dateutil import parser
 from functools import partial
 
@@ -31,8 +32,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 
 # TODO: homework and error update
-# TODO: solo /lesson /language /level etc handlers
-# 
+# TODO: add oral comprehension and oral production
+# TODO: llm mapping from free text to functions
 
 class TelegramBot(IBot):
     """
@@ -65,29 +66,25 @@ class TelegramBot(IBot):
         self.bot = self.initialize_bot()
 
         # User-specific state management for multi-step conversations
-        # {chat_id: {'step': 'current_step_name', 'data': {key: value}}}
+        # {self.chat_id: {'step': 'current_step_name', 'data': {key: value}}}
         self.user_states: Dict[int, Dict[str, Any]] = {}
         logging.info("User states dictionary initialized.")
 
         # Bot configuration and lesson data
+        self.name: Optional[str] = None
+        self.chat_id: Optional[int] = None
         self.language: Optional[str] = None
         self.level: Optional[str] = None
         self.limitation: Optional[str] = None
+        self.current_lesson: Optional[str] = None
         self.next_lesson: Optional[str] = None
         self.lesson_sections: List[str] = []  # Sections for the current lesson
         self.lesson_history: List[Dict[str, str]] = []  # LLM conversation history for current lesson
-        self.abilities: List[str] = [
-            "Listening comprehension", "Oral production", "Reading comprehension",
-            "Written production", "Culture and Pragmatics", "Vocabulary Acquisition",
-            "Grammar and syntax", "Phonetics and Pronunciation", "Orthography and Spelling",
-            "Consolidation of previously learned content", "Refinement of previously learned content",
-            "Discourse Analysis & Cohesion", "Practice games and exercises", "Practice weak points",
-        ]
         self.learned_languages: List[str] = ['english (default)']  # Default if not set
         self.reminder_time: Optional[str] = None  # HH:MM format
         self.reminder_job = None  # schedule.Job object
         # TODO  ###################################
-        self.reminded_today: Dict[int, bool] = {}  # {chat_id: True/False} to track daily reminder sent
+        self.reminded_today: Dict[int, bool] = {}  # {self.chat_id: True/False} to track daily reminder sent
         self.lesson_errors: List[str] = []  # Errors from user's practice
         self.seen_content: List[str] = []  # Content covered in lessons
         self.mastered: List[str] = []  # Content user has mastered
@@ -119,6 +116,57 @@ class TelegramBot(IBot):
             logging.error(f"Error in text2list LLM call: {err}", exc_info=True)
             return []
 
+    def student_data_dump(self,
+                          ) -> None:
+        """
+        Dumps the telegram bot student data to a json file
+        """
+        # make a directory where to save the data from each channel if it doens't exist
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(current_dir, "data")
+        file_path = os.path.join(data_dir, f"{self.chat_id}.json")
+        if not os.path.isdir(data_dir):
+            os.makedirs(data_dir, mode=0o755, exist_ok=True)
+        # Save all attributes of the class to a dictionary
+        values_to_save = {}
+        for attr in dir(self):
+            if not callable(getattr(self, attr)) and not attr.startswith("__") and attr not in ["model", "bot",
+                                                                                                "_abc_impl",
+                                                                                                "reminder_job"]:
+                values_to_save[attr] = getattr(self, attr)
+        if os.path.isfile(file_path):
+            # Load existing json dictionary
+            with open(file_path, "r", encoding='utf-8') as in_f:
+                saved_values = json.load(in_f)
+            if saved_values == values_to_save:
+                logging.info(f"No changes detected for chat ID {self.chat_id}. Skipping save.")
+                return
+        # Save the dictionary to a json file if something changed
+        with open(file_path, "w", encoding='utf-8') as out_f:
+            json.dump(values_to_save, out_f, indent=4)
+            logging.info(f"Saving student data.")
+
+    def student_data_load(self,
+                          ) -> None:
+        """
+        Load the telegram bot student data from a json file to the class attribute variables
+        """
+        # check the directory where the data must be saved
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(current_dir, "data")
+        file_path = os.path.join(data_dir, f"{self.chat_id}.json")
+        # replace the class attributes only if the json file exists and the class was reset to its default empty values
+        if os.path.isfile(file_path) and not self.language:
+            # Load the dictionary from a json file
+            with open(file_path, "r", encoding='utf-8') as in_f:
+                saved_values = json.load(in_f)
+            # load all attributes of the dictionary to the class
+            for attr in dir(self):
+                if attr in saved_values:
+                    # set attribute value to the one in the dictionary
+                    attr_save_vals = saved_values[attr] if attr != "user_states" else {int(kk): vv for kk, vv in saved_values[attr].items()}
+                    setattr(self, attr, attr_save_vals)
+
     def initialize_bot(self) -> telebot.TeleBot:
         """
         Initializes the Telegram bot
@@ -130,21 +178,24 @@ class TelegramBot(IBot):
         Starts the bot's polling loop and the scheduler thread.
         """
         logging.info("Starting the Telegram bot polling and scheduler.")
-        # Start Telegram bot polling in a separate thread
-        bot_thread = threading.Thread(target=self.bot.polling, kwargs={'none_stop': True})
-        bot_thread.daemon = True
-        bot_thread.start()
-        logging.info("Telegram bot polling thread started.")
-
         # Start scheduler in a separate thread
         scheduler_thread = threading.Thread(target=self._scheduler_thread)
         scheduler_thread.daemon = True
         scheduler_thread.start()
         logging.info("Scheduler thread started.")
 
-        # Keep the main thread alive
         while True:
-            time.sleep(1)
+            try:
+                # Start Telegram bot polling in a separate thread
+                bot_thread = threading.Thread(target=self.bot.polling, kwargs={'none_stop': True})
+                bot_thread.daemon = True
+                bot_thread.start()
+                logging.info("Telegram bot polling thread started.")
+                # Keep the main thread alive
+                while True:
+                    time.sleep(1)
+            except requests.exceptions.Timeout:
+                logging.info("Telegram bot thread Timed out.")
 
     def _scheduler_thread(self):
         """
@@ -152,18 +203,135 @@ class TelegramBot(IBot):
         """
         # Schedule daily reset of reminded_today flag
         schedule.every().day.at("00:00").do(self._reset_reminded_flag)
-        logging.info("Scheduled daily reset of reminder flag at 00:00 UTC.")
+        logging.info("Scheduled daily reset of reminder flag at 00:00.")
 
         while True:
             schedule.run_pending()
             time.sleep(1)  # Check every second
 
+    def lesson_maker(self,
+                     course_language: str,
+                     user_limitation: str,
+                     lesson_elem: str,
+                     instruction_language: str,
+                     user_seen_content: List,
+                     user_mastered: List,
+                     user_level: str,
+                     revision_bool: bool,
+                     ) -> str:
+        lesson_content = ""
+        # previous content revision
+        if revision_bool:
+            revision_content = self.text2list(", ".join(user_seen_content + user_mastered),
+                                              f"Extract from the list all the topics that can be useful "
+                                              f"as a base to learn about {lesson_elem}")
+            revision_content = revision_content if revision_content is not None else user_seen_content + user_mastered
+            lesson_content = self.model.call(
+                user_prompt=f"You are teaching a {course_language} class."
+                            f"The instructions and explanations must be foreigner-friendly/kid-friendly and "
+                            f"written in a version of {instruction_language} so simple, a 7 years old should be able "
+                            f"to read it. "
+                            f"Do not write direct translations of the content, you may use emojis to illustrate."
+                            f"As a way to start the class, make "
+                            f"a very short, simple, and clear introductory revision of previously seen content: "
+                            f"{random.choice(revision_content)}",
+                system_prompt=f"You are a succinct  foreign language teacher teaching a 1-on-1 {course_language} "
+                              f"class to your student {self.name} (LEVEL: {self.level}, LIMITATION: {user_limitation}).",
+                history=self.lesson_history
+                # max_tokens=3000,  # Limit the response length
+            )
+            lesson_content += "\n\n"
+        # new content presentation
+        content_presentation = self.model.call(
+            user_prompt=f"You are teaching a {course_language} class. The topic of the class is {lesson_elem}. "
+                        f"The instructions and explanations must be foreigner-friendly/kid-friendly and "
+                        f"written in a version of {instruction_language} so simple, a 7 years old should be able "
+                        f"to read it. "
+                        f"The lesson's new content must be in {course_language}."                        
+                        f"Do not write direct translations of the content, you may use emojis to illustrate. "
+                        f"Make a simple and clear explanation of the topic and a schematic "
+                        f"presentation of the content. Do not make practice exercises, someone else is in charge of "
+                        f"those. Instead of figures, add emojis and simple ASCII pictures to ease the semantic "
+                        f"understanding by illustrating concepts, actions, persons, etc.",
+            system_prompt=f"You are a succinct  foreign language teacher teaching a 1-on-1 {course_language} class"
+                          f" to your student {self.name} (LEVEL: {self.level}, LIMITATION: {user_limitation}).",
+            history=self.lesson_history
+            # max_tokens=3000,  # Limit the response length
+        )
+        lesson_content += f"{content_presentation}\n\n"
+        # add exercices
+        lesson_content += self.model.call(
+            user_prompt=f"You are teaching a {course_language} class. The topic of the class is {lesson_elem}. "
+                        f"The instructions and explanations must be foreigner-friendly/kid-friendly and "
+                        f"written in a simple version of {instruction_language}. The content to exercise must be "
+                        f"in {course_language}. "
+                        f"Make 4 exercises that practice each of the skills: Listening comprehension, Oral production, "
+                        f"Reading comprehension, Written production. "
+                        f"The exercises must practice the following content: {content_presentation}",
+            system_prompt=f"You are a succinct foreign language teacher teaching a 1-on-1 {course_language} class through a "
+                          f"text messaging app for {self.name} (LEVEL: {self.level}, LIMITATION: {user_limitation}).",
+            history=self.lesson_history
+            # max_tokens=3000,  # Limit the response length
+        )
+        lesson_content += "\n\n"
+        return lesson_content
+
+    def _lesson_maker_thread(self):
+        """
+        Function to run the lesson maker loop in a separate thread.
+        """
+        if self.next_lesson is not None:
+            self.current_lesson = self.next_lesson
+            self.next_lesson = None
+        user_data = self.user_states[self.chat_id]
+        lesson_sections = user_data.get('lesson_sections', [])
+
+        if not lesson_sections and not self.current_lesson:
+            self.bot.send_message(self.chat_id, "You have completed all sections for this lesson! "
+                                           "Type /new to start a new lesson.")
+            logging.info(f"All lesson sections completed for {self.chat_id}.")
+            return
+
+        # Use pop(0) to get the first element and remove it (queue-like behavior)
+        lesson_elem = lesson_sections.pop(0) if lesson_sections else f"Introduction to {self.current_lesson}"
+        user_data['lesson_sections'] = lesson_sections  # Update the user's state
+
+        # Prepare LLM prompt with user-specific data
+        course_language = user_data['language']
+        user_level = user_data['level']
+        user_limitation = user_data.get('limitation', 'None')
+        user_mastered = user_data.get('mastered', [])
+        user_seen_content = user_data.get('seen_content', [])
+        # TODO add error correction and compilation in class object
+        user_errors = user_data.get('lesson_errors', [])
+        # TODO: add revision previous content and homework
+        beginner_level_bool = self.model.call(
+            user_prompt=f"Return 'True' if the following level is very low beginner level and a foreign language "
+                        f"student cannot be expected to read the language yet: {user_level}, otherwise return 'False'.",
+            system_prompt=f"You are a succinct assistant that replies using boolean values only.",
+            history=self.lesson_history
+        )
+        beginner_level_bool = True if 'true' in beginner_level_bool.lower() else False
+        # set the instruction language as the learning language if the user is not a beginner
+        instruction_language = course_language if not beginner_level_bool else None
+        instruction_language = user_data.get('learned_languages', ['english (default)']) if instruction_language is None else instruction_language
+        instruction_language = instruction_language[0]
+        revision_bool = False if not user_mastered + user_seen_content else True
+        if self.current_lesson is None:
+            self.current_lesson = self.lesson_maker(course_language, user_limitation, lesson_elem,
+                                                    instruction_language, user_seen_content, user_mastered,
+                                                    user_level, revision_bool)
+        if self.next_lesson is None:
+            self.next_lesson = self.lesson_maker(course_language, user_limitation, lesson_elem,
+                                                 instruction_language, user_seen_content, user_mastered,
+                                                 user_level, revision_bool)
+
     def _reset_reminded_flag(self):
         """
         Resets the reminded_today flag for all users at midnight.
         """
-        for chat_id in self.reminded_today:
-            self.reminded_today[chat_id] = False
+        for self.chat_id in self.reminded_today:
+            self.reminded_today[self.chat_id] = False
         logging.info("Reminder flags reset for all users.")
 
     def _register_handlers(self):
@@ -172,6 +340,7 @@ class TelegramBot(IBot):
         """
         self.bot.message_handler(commands=['setup'])(self._handle_setup_command)
         # TODO info handlers should not be chained to one another check and correct ######################################
+        self.bot.message_handler(commands=['name'])(self._handle_name_command)
         self.bot.message_handler(commands=['language'])(self._handle_language_command)
         self.bot.message_handler(commands=['level'])(self._handle_level_command)
         self.bot.message_handler(commands=['limitation'])(self._handle_limitation_command)
@@ -194,26 +363,52 @@ class TelegramBot(IBot):
         """
         Initiates the setup flow. Asks for language.
         """
-        chat_id = message.chat.id
-        logging.info(f"Received /setup from chat ID: {chat_id}")
-        self.user_states[chat_id] = {'step': 'awaiting_language'}
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        logging.info(f"Received /setup from chat ID: {self.chat_id}")
+        self.user_states[self.chat_id] = {'step': 'awaiting_language'}
         self.lesson_history = []  # Reset history for new start
         self.bot.send_message(
-            chat_id,
+            self.chat_id,
             "Hi! I am a Foreign language teaching agent. "
-            "What language do you want to learn or practice?"
+            "Would you be so kind to provide me a name or nickname? What should I call you?"
         )
-        self.bot.register_next_step_handler(message, self._process_language_input)
-        logging.info(f"Set next step for {chat_id} to _process_language_input.")
+        self.bot.register_next_step_handler(message, self._process_name_input)
+        logging.info(f"Set next step for {self.chat_id} to _process_name_input.")
+
+    def _process_name_input(self, message: telebot.types.Message) -> None:
+        """
+        Processes name input and asks for language.
+        """
+        self.chat_id = message.chat.id
+        user_message = message.text
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(self.chat_id, "Please provide a name (check that your name does not start with "
+                                           "a '/'). Try /name or /setup again.")
+            return
+        try:
+            self.name = user_message
+            self.user_states[self.chat_id]['name'] = user_message
+            self.bot.send_message(self.chat_id, f"Nice to meet you {user_message}!")
+            self.user_states[self.chat_id] = {'step': 'awaiting_language'}
+            self.bot.send_message(
+                self.chat_id,
+                "What language do you want to learn or practice?"
+            )
+            self.bot.register_next_step_handler(message, self._process_language_input)
+            logging.info(f"Set next step for {self.chat_id} to _process_language_input.")
+        except Exception as err:
+            logging.error(f"Error processing name for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I am having trouble processing that name. Please try again.")
 
     def _process_language_input(self, message: telebot.types.Message) -> None:
         """
         Processes language input and asks for level.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         user_message = message.text
         if not user_message or user_message.startswith('/'):
-            self.bot.send_message(chat_id, "Please provide a language. Try /language or /setup again.")
+            self.bot.send_message(self.chat_id, "Please provide a language. Try /language or /setup again.")
             return
 
         try:
@@ -226,32 +421,32 @@ class TelegramBot(IBot):
             )
             # TODO below comment + ask for level if in /setup only##############################################
             self.language = user_message_summary
-            # For multi-user, store in user_states: self.user_states[chat_id]['language'] = user_message_summary
-            self.user_states[chat_id]['language'] = user_message_summary
-            self.bot.send_message(chat_id, f"Great! You want to learn {user_message_summary}")
-            logging.info(f"Language set for {chat_id}: {user_message_summary}")
+            # For multi-user, store in user_states: self.user_states[self.chat_id]['language'] = user_message_summary
+            self.user_states[self.chat_id]['language'] = user_message_summary
+            self.bot.send_message(self.chat_id, f"Great! You want to learn {user_message_summary}")
+            logging.info(f"Language set for {self.chat_id}: {user_message_summary}")
 
-            self.user_states[chat_id]['step'] = 'awaiting_level'
+            self.user_states[self.chat_id]['step'] = 'awaiting_level'
             self.bot.send_message(
-                chat_id,
+                self.chat_id,
                 "Can you tell me your level of proficiency in this language? "
                 "If you are unsure, you can shortly explain what you can do in this language, "
                 "or just ask to start from the beginning."
             )
             self.bot.register_next_step_handler(message, self._process_level_input)
-            logging.info(f"Set next step for {chat_id} to _process_level_input.")
+            logging.info(f"Set next step for {self.chat_id} to _process_level_input.")
         except Exception as err:
-            logging.error(f"Error processing language for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that language. Please try again.")
+            logging.error(f"Error processing language for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that language. Please try again.")
 
     def _process_level_input(self, message: telebot.types.Message) -> None:
         """
         Processes level input and asks for limitations.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         user_message = message.text
         if not user_message or user_message.startswith('/'):
-            self.bot.send_message(chat_id, "Please provide your level. Try /level or /setup again.")
+            self.bot.send_message(self.chat_id, "Please provide your level. Try /level or /setup again.")
             return
 
         try:
@@ -262,42 +457,42 @@ class TelegramBot(IBot):
                 system_prompt="You are a succinct extractor and format standardizer."
             )
             self.level = user_message_summary
-            self.user_states[chat_id]['level'] = user_message_summary
-            self.bot.send_message(chat_id, f"Understood, your level is {user_message_summary}\n\nGive me a second...")
-            logging.info(f"Level set for {chat_id}: {user_message_summary}")
+            self.user_states[self.chat_id]['level'] = user_message_summary
+            self.bot.send_message(self.chat_id, f"Understood, your level is {user_message_summary}\n\nGive me a second...")
+            logging.info(f"Level set for {self.chat_id}: {user_message_summary}")
 
             # Infer mastered content based on level
             infered_master_content = self.model.call(
-                user_prompt=f"Given a {self.user_states[chat_id]['level']} proficiency level in {self.user_states[chat_id]['language']}, make a list of all the content "
+                user_prompt=f"Given a {self.user_states[self.chat_id]['level']} proficiency level in {self.user_states[self.chat_id]['language']}, make a list of all the content "
                             f"that a foreign language student should already know?",
                 system_prompt="You are a succinct assistant."
             )
             self.seen_content = [infered_master_content]
-            self.user_states[chat_id]['seen_content'] = [infered_master_content]
-            self._clean_mastered(chat_id)  # Ensure this operates on user-specific data if needed
-            logging.info(f"Inferred seen content for {chat_id}.")
+            self.user_states[self.chat_id]['seen_content'] = [infered_master_content]
+            self._clean_mastered()  # Ensure this operates on user-specific data if needed
+            logging.info(f"Inferred seen content for {self.chat_id}.")
 
-            self.user_states[chat_id]['step'] = 'awaiting_lesson_preference'
+            self.user_states[self.chat_id]['step'] = 'awaiting_lesson_preference'
             self.bot.send_message(
-                chat_id,
+                self.chat_id,
                 "Do you have any preference to what you would like to start learning? "
                 "If you do not know, you can just type 'no'."
             )
             self.bot.register_next_step_handler(message, self._process_lesson_preference_input)
-            logging.info(f"Set next step for {chat_id} to _process_lesson_preference_input.")
+            logging.info(f"Set next step for {self.chat_id} to _process_lesson_preference_input.")
 
         except Exception as err:
-            logging.error(f"Error processing level for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that level. Please try again.")
+            logging.error(f"Error processing level for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that level. Please try again.")
 
     def _process_lesson_preference_input(self, message: telebot.types.Message) -> None:
         """
         Processes lesson preference and asks about optional questions.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         user_message = message.text
         if not user_message or user_message.startswith('/'):
-            self.bot.send_message(chat_id, "Please provide a lesson preference or type 'no'.")
+            self.bot.send_message(self.chat_id, "Please provide a lesson preference or type 'no'.")
             return
         try:
             llm_output = self.model.call(
@@ -313,60 +508,72 @@ class TelegramBot(IBot):
                 max_line_length=None,
                 normalize_whitespace=False
             )
-            self.next_lesson = llm_output
-            self.user_states[chat_id]['next_lesson'] = llm_output
-            self.bot.send_message(chat_id, f"Okay, your initial lesson will be:\n{llm_output_converted}")
-            logging.info(f"Lesson preference set for {chat_id}: {llm_output}")
+            self.user_states[self.chat_id]['next_lesson'] = llm_output
+            self.bot.send_message(self.chat_id, f"Okay, your initial lesson will be:\n{llm_output_converted}")
+            logging.info(f"Lesson preference set for {self.chat_id}: {llm_output}")
 
-            self.user_states[chat_id]['step'] = 'awaiting_optional_questions_choice'
+            # Start lesson writer in a separate thread
+            lesson_maker_thread = threading.Thread(target=self._lesson_maker_thread)
+            lesson_maker_thread.daemon = True
+            lesson_maker_thread.start()
+            logging.info("Lesson make thread started.")
+
+            self.user_states[self.chat_id]['step'] = 'awaiting_optional_questions_choice'
             self.bot.send_message(
-                chat_id,
+                self.chat_id,
                 "We have a couple more questions for an optimal learning experience. Do you want to answer them? "
                 "If you want to answer them type 'yes', if you want to skip them type 'no'."
             )
             self.bot.register_next_step_handler(message, self._process_optional_questions_choice)
-            logging.info(f"Set next step for {chat_id} to _process_optional_questions_choice.")
+            logging.info(f"Set next step for {self.chat_id} to _process_optional_questions_choice.")
         except Exception as err:
-            logging.error(f"Error processing lesson preference for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that. Consider /setup again.")
+            logging.error(f"Error processing lesson preference for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that. Consider /setup again.")
 
     def _process_optional_questions_choice(self, message: telebot.types.Message) -> None:
         """
         Processes the choice for optional questions and either proceeds or skips.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         user_choice = message.text.lower()
         if not user_choice or user_choice.startswith('/'):
-            self.bot.send_message(chat_id, "Please type 'yes' or 'no'. Or consider /setup again.")
+            self.bot.send_message(self.chat_id, "Please type 'yes' or 'no'. Or consider /setup again.")
             return
 
         if 'yes' in user_choice:
-            self.user_states[chat_id]['step'] = 'awaiting_learned_languages'
+            self.user_states[self.chat_id]['step'] = 'awaiting_learned_languages'
             self.bot.send_message(
-                chat_id,
+                self.chat_id,
                 "Please list all languages you already know. "
                 "If you wish to, you can specify how fluent you are in each of them."
             )
             self.bot.register_next_step_handler(message, self._process_learned_languages_input)
-            logging.info(f"Set next step for {chat_id} to _process_learned_languages_input.")
+            logging.info(f"Set next step for {self.chat_id} to _process_learned_languages_input.")
+            # Dump the current state to file
+            self.student_data_dump()
         elif '/no' in user_choice or 'no' in user_choice:
             # Skip optional questions, proceed to start lesson
-            self.bot.send_message(chat_id, "Okay, skipping the additional questions. Let's start your lesson!")
-            logging.info(f"Skipping optional questions for {chat_id}.")
-            self._start_lesson_flow(message)  # Directly call the lesson start
+            self.bot.send_message(self.chat_id, "Okay, skipping the additional questions. "
+                                                "Let's prepare your lesson!"
+                                                "\n\nThis may take up to 60 seconds.")
+            logging.info(f"Skipping optional questions for {self.chat_id}.")
+            # Dump the current state to file
+            self.student_data_dump()
+            # Directly call the lesson start
+            self._start_lesson_flow(message)
         else:
-            self.bot.send_message(chat_id, "Invalid choice. Please type 'yes' or 'no'.")
+            self.bot.send_message(self.chat_id, "Invalid choice. Please type 'yes' or 'no'.")
             self.bot.register_next_step_handler(message, self._process_optional_questions_choice)  # Ask again
-            logging.warning(f"Invalid optional questions choice from {chat_id}: {user_choice}. Asking again.")
+            logging.warning(f"Invalid optional questions choice from {self.chat_id}: {user_choice}. Asking again.")
 
     def _process_learned_languages_input(self, message: telebot.types.Message) -> None:
         """
         Processes learned languages input and asks for mastered content.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         user_message = message.text
         if not user_message or user_message.startswith('/'):
-            self.bot.send_message(chat_id, "Please list your known languages or type 'None'. Try /setup again.")
+            self.bot.send_message(self.chat_id, "Please list your known languages or type 'None'. Try /setup again.")
             return
 
         try:
@@ -375,36 +582,36 @@ class TelegramBot(IBot):
                                                     "the languages mentioned.",
                                        )
             self.learned_languages = lang_list
-            self.user_states[chat_id]['learned_languages'] = lang_list
-            self.bot.send_message(chat_id, f"Got it. You know: {', '.join(lang_list)}.")
-            logging.info(f"Learned languages set for {chat_id}: {lang_list}")
+            self.user_states[self.chat_id]['learned_languages'] = lang_list
+            self.bot.send_message(self.chat_id, f"Got it. You know: {', '.join(lang_list)}.")
+            logging.info(f"Learned languages set for {self.chat_id}: {lang_list}")
 
-            self.user_states[chat_id]['step'] = 'awaiting_mastered_content'
+            self.user_states[self.chat_id]['step'] = 'awaiting_mastered_content'
             infered = ""
-            current_mastered = self.user_states[chat_id].get('mastered', [])
+            current_mastered = self.user_states[self.chat_id].get('mastered', [])
             if current_mastered:
                 infered = (f"Given your level, we inferred that you have already learned some content in this language:"
                            f" {', '.join(current_mastered)}.\n")
             self.bot.send_message(
-                chat_id,
+                self.chat_id,
                 f"{infered}Please list any other content you already know and do not wish to study again "
                 f"(we will revise it later but in the meantime, we will use that content to learn new things)."
             )
             self.bot.register_next_step_handler(message, self._process_mastered_content_input)
-            logging.info(f"Set next step for {chat_id} to _process_mastered_content_input.")
+            logging.info(f"Set next step for {self.chat_id} to _process_mastered_content_input.")
         except Exception as err:
-            logging.error(f"Error processing learned languages for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that. Please type /learned or "
+            logging.error(f"Error processing learned languages for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that. Please type /learned or "
                                            "/start again.")
 
     def _process_mastered_content_input(self, message: telebot.types.Message) -> None:
         """
         Processes mastered content input and asks for reminder time.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         user_message = message.text
         if not user_message or user_message.startswith('/'):
-            self.bot.send_message(chat_id, "Please list mastered content or type 'None'. "
+            self.bot.send_message(self.chat_id, "Please list mastered content or type 'None'. "
                                            "Please type /mastered or /setup again.")
             return
 
@@ -413,17 +620,17 @@ class TelegramBot(IBot):
                                        prompt_intro=f"This is the answer to the question 'what is the language content "
                                                     f"you studied and know?'. Extract all the content mentioned (with "
                                                     f"any necessary details). Everything must be written in "
-                                                    f"{self.user_states[chat_id]['language']}",
+                                                    f"{self.user_states[self.chat_id]['language']}",
                                        )
             self.mastered += user_list
-            self.user_states[chat_id]['mastered'] = self.user_states[chat_id].get('mastered', []) + user_list
-            self._clean_mastered(chat_id)  # Clean mastered content based on errors # TODO check if necessary #################################
-            self.bot.send_message(chat_id, f"Acknowledged. Mastered content added.")
-            logging.info(f"Mastered content set for {chat_id}.")
+            self.user_states[self.chat_id]['mastered'] = self.user_states[self.chat_id].get('mastered', []) + user_list
+            self._clean_mastered()  # Clean mastered content based on errors # TODO check if necessary #################################
+            self.bot.send_message(self.chat_id, f"Acknowledged. Mastered content added.")
+            logging.info(f"Mastered content set for {self.chat_id}.")
 
-            self.user_states[chat_id]['step'] = 'awaiting_limitation'
+            self.user_states[self.chat_id]['step'] = 'awaiting_limitation'
             self.bot.send_message(
-                chat_id,
+                self.chat_id,
                 "Do you have any physical/cognitive/psychological/emotional/other limitations of which I should "
                 "be aware? "
                 "This includes but is not limited to sight impairment, hearing impairment, talking impairment, "
@@ -432,20 +639,20 @@ class TelegramBot(IBot):
                 "environment or type 'no' if you have none."
             )
             self.bot.register_next_step_handler(message, self._process_limitation_input)
-            logging.info(f"Set next step for {chat_id} to _process_limitation_input.")
+            logging.info(f"Set next step for {self.chat_id} to _process_limitation_input.")
         except Exception as err:
-            logging.error(f"Error processing mastered content for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that. "
+            logging.error(f"Error processing mastered content for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that. "
                                            "Please try /limitation or /setup again.")
 
     def _process_limitation_input(self, message: telebot.types.Message) -> None:
         """
         Processes limitation input and asks for lesson preference.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         user_message = message.text
         if not user_message or user_message.startswith('/'):
-            self.bot.send_message(chat_id, "Please provide any limitations or type 'None'. "
+            self.bot.send_message(self.chat_id, "Please provide any limitations or type 'None'. "
                                            "Please try /limitation or /setup again.")
             return
 
@@ -458,31 +665,31 @@ class TelegramBot(IBot):
                 system_prompt="You are a succinct extractor and format standardizer."
             )
             self.limitation = user_message_summary
-            self.user_states[chat_id]['limitation'] = user_message_summary
-            self.bot.send_message(chat_id, f"Acknowledged. Your limitations: {user_message_summary}")
-            logging.info(f"Limitation set for {chat_id}: {user_message_summary}")
+            self.user_states[self.chat_id]['limitation'] = user_message_summary
+            self.bot.send_message(self.chat_id, f"Acknowledged. Your limitations: {user_message_summary}")
+            logging.info(f"Limitation set for {self.chat_id}: {user_message_summary}")
 
-            self.user_states[chat_id]['step'] = 'awaiting_reminder_time'
+            self.user_states[self.chat_id]['step'] = 'awaiting_reminder_time'
             self.bot.send_message(
-                chat_id,
+                self.chat_id,
                 "Do you want to set a daily reminder? "
                 "We will send you a message through this app, so please allow its notifications. "
-                "Please say what time you would like to set the reminder (HH:MM UTC) or type 'no' to skip this step."
+                "Please say what time you would like to set the reminder (HH:MM) or type 'no' to skip this step."
             )
             self.bot.register_next_step_handler(message, self._process_reminder_time_input)
-            logging.info(f"Set next step for {chat_id} to _process_reminder_time_input.")
+            logging.info(f"Set next step for {self.chat_id} to _process_reminder_time_input.")
         except Exception as err:
-            logging.error(f"Error processing limitation for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble understanding that limitation. Please try again.")
+            logging.error(f"Error processing limitation for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that limitation. Please try again.")
 
     def _process_reminder_time_input(self, message: telebot.types.Message) -> None:
         """
         Processes reminder time input and concludes setup, starting the lesson.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         user_message = message.text.lower()
         if not user_message or user_message.startswith('/'):
-            self.bot.send_message(chat_id, "Please provide a time (HH:MM UTC) or type 'no'. "
+            self.bot.send_message(self.chat_id, "Please provide a time (HH:MM) or type 'no'. "
                                            "Try /reminder or /setup again.")
             return
 
@@ -494,17 +701,15 @@ class TelegramBot(IBot):
             )
             if "None" in user_message_summary:
                 self.reminder_time = None
-                self.user_states[chat_id]['reminder_time'] = None
-                self.bot.send_message(chat_id, "Reminder skipped.")
-                logging.info(f"Reminder skipped for {chat_id}.")
+                self.user_states[self.chat_id]['reminder_time'] = None
+                self.bot.send_message(self.chat_id, "Reminder skipped.")
+                logging.info(f"Reminder skipped for {self.chat_id}.")
             else:
                 parsed_time = parser.parse(user_message_summary).strftime("%H:%M")
                 self.reminder_time = parsed_time
-                self.user_states[chat_id]['reminder_time'] = parsed_time
+                self.user_states[self.chat_id]['reminder_time'] = parsed_time
                 # Schedule the reminder, job will be stored in a user-specific way if needed for cancellation
-                job = schedule.every().day.at(parsed_time).do(
-                    partial(self._send_reminder_callback, chat_id)
-                )
+                job = schedule.every().day.at(parsed_time).do(self._send_reminder_callback)
                 # TODO check if true ############################################################
                 # Store job object if you want to cancel it later for this user
                 # For simplicity, if multiple users set reminders for the same time,
@@ -512,39 +717,42 @@ class TelegramBot(IBot):
                 # you'd need a more complex structure in self.reminders.
                 # For now, let's assume reminder_job is for the current user's last set reminder.
                 self.reminder_job = job
-                self.bot.send_message(chat_id, f"Daily reminder set for {parsed_time} UTC!")
-                logging.info(f"Reminder set for {chat_id} at {parsed_time}.")
+                self.bot.send_message(self.chat_id, f"Daily reminder set for {parsed_time}!")
+                logging.info(f"Reminder set for {self.chat_id} at {parsed_time}.")
 
-            self.user_states[chat_id]['step'] = 'setup_complete'
-            self.bot.send_message(chat_id, "Setup complete! Let's start your first lesson.")
-            logging.info(f"Setup complete for {chat_id}.")
+            self.user_states[self.chat_id]['step'] = 'setup_complete'
+            self.bot.send_message(self.chat_id, "Setup complete! Let's prepare your first lesson.\n\n"
+                                                "This may take up to 60 seconds.")
+            logging.info(f"Setup complete for {self.chat_id}.")
             self._start_lesson_flow(message)  # Proceed to start the lesson
+            # Dump the current state to file
+            self.student_data_dump()
         except ValueError:
-            self.bot.send_message(chat_id, "Invalid time format. Please use HH:MM UTC (e.g., 14:30) or type 'no'.")
+            self.bot.send_message(self.chat_id, "Invalid time format. Please use HH:MM (e.g., 14:30) or type 'no'.")
             self.bot.register_next_step_handler(message, self._process_reminder_time_input)  # Ask again
-            logging.warning(f"Invalid reminder time format from {chat_id}: {user_message}. Asking again.")
+            logging.warning(f"Invalid reminder time format from {self.chat_id}: {user_message}. Asking again.")
         except Exception as err:
-            logging.error(f"Error processing reminder time for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I had trouble setting the reminder. "
+            logging.error(f"Error processing reminder time for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble setting the reminder. "
                                            "Please try /reminder or /setup again.")
 
     def _start_lesson_flow(self, message: telebot.types.Message) -> None:
         """
         Starts the first lesson after setup is complete.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         # Use user-specific data from user_states
-        user_language = self.user_states[chat_id]['language']
-        user_level = self.user_states[chat_id]['level']
-        user_limitation = self.user_states[chat_id].get('limitation', 'None')
-        user_learned_languages = self.user_states[chat_id].get('learned_languages', ['english (default)'])
-        user_mastered = self.user_states[chat_id].get('mastered', [])
-        user_seen_content = self.user_states[chat_id].get('seen_content', [])
+        user_language = self.user_states[self.chat_id]['language']
+        user_level = self.user_states[self.chat_id]['level']
+        user_limitation = self.user_states[self.chat_id].get('limitation', 'None')
+        user_learned_languages = self.user_states[self.chat_id].get('learned_languages', ['english (default)'])
+        user_mastered = self.user_states[self.chat_id].get('mastered', [])
+        user_seen_content = self.user_states[self.chat_id].get('seen_content', [])
 
         # Simulate initial lesson content generation
-        initial_lesson_name = self.user_states[chat_id].get('next_lesson', 'a general introductory topic')
-        self.bot.send_message(chat_id, f"Starting your lesson on:\n{initial_lesson_name}")
-        logging.info(f"Starting lesson flow for {chat_id} on {initial_lesson_name}")
+        initial_lesson_name = self.user_states[self.chat_id].get('next_lesson', 'a general introductory topic')
+        self.bot.send_message(self.chat_id, f"Starting your lesson on:\n{initial_lesson_name}")
+        logging.info(f"Starting lesson flow for {self.chat_id} on {initial_lesson_name}")
 
         # Directly call _handle_new_lesson_command as if user typed /new
         # We need to pass the current message to it.
@@ -552,57 +760,273 @@ class TelegramBot(IBot):
 
     # --- Command Handlers (can be called directly by user at any time) ---
 
+    def _handle_name_command(self, message: telebot.types.Message) -> None:
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        self.bot.send_message(self.chat_id, "What name do you want me to call you?")
+        user_message = message.text
+        logging.info(f"User {self.chat_id} initiated /name command.")
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(self.chat_id, "Please provide a name (make sure it does not start with a '/'). "
+                                           "Try /language or /setup again.")
+            return
+        try:
+            self.language = user_message
+            # For multi-user, store in user_states: self.user_states[self.chat_id]['language'] = user_message_summary
+            self.user_states[self.chat_id]['language'] = user_message
+            self.bot.send_message(self.chat_id, f"Great! I will call you {user_message}")
+            logging.info(f"Name set for {self.chat_id}: {user_message}")
+            # Dump the current state to file
+            self.student_data_dump()
+        except Exception as err:
+            logging.error(f"Error processing name for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that name. Please try again.")
+
     def _handle_language_command(self, message: telebot.types.Message) -> None:
-        chat_id = message.chat.id
-        self.bot.send_message(chat_id, "What language do you want to learn or practice?")
-        self.bot.register_next_step_handler(message, self._process_language_input) # Reuse existing processor
-        logging.info(f"User {chat_id} initiated /language command.")
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        self.bot.send_message(self.chat_id, "What language do you want to learn or practice?")
+        user_message = message.text
+        logging.info(f"User {self.chat_id} initiated /language command.")
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(self.chat_id, "Please provide a language. Try /language or /setup again.")
+            return
+        try:
+            user_message_summary = self.model.call(
+                user_prompt=f"This is the answer to the question 'what language do you want to learn?'. Output the "
+                            f"standard name of the language along with any necessary details like regional "
+                            f"specificities/level/register/etc. It must be written in said language. (use as few words "
+                            f"as possible to summarize all concepts): {user_message}",
+                system_prompt="You are a succinct extractor and format standardizer.",
+            )
+            self.language = user_message_summary
+            # For multi-user, store in user_states: self.user_states[self.chat_id]['language'] = user_message_summary
+            self.user_states[self.chat_id]['language'] = user_message_summary
+            self.bot.send_message(self.chat_id, f"Great! We have set the language: {user_message_summary}")
+            logging.info(f"Language set for {self.chat_id}: {user_message_summary}")
+            # Dump the current state to file
+            self.student_data_dump()
+        except Exception as err:
+            logging.error(f"Error processing language for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that language. Please try again.")
 
     def _handle_level_command(self, message: telebot.types.Message) -> None:
-        chat_id = message.chat.id
-        self.bot.send_message(chat_id, "What is your language proficiency/level?")
-        self.bot.register_next_step_handler(message, self._process_level_input) # Reuse existing processor
-        logging.info(f"User {chat_id} initiated /level command.")
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        user_message = message.text
+        self.bot.send_message(self.chat_id, "What is your language proficiency/level?")
+        logging.info(f"User {self.chat_id} initiated /level command.")
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(self.chat_id, "Please provide your level. Try /level or /setup again.")
+            return
+        try:
+            user_message_summary = self.model.call(
+                user_prompt=f"This is the answer to the question 'what is your language proficiency/level?'. Output the "
+                            f"standard name of the level along with any necessary details (use as few words as possible "
+                            f"to summarize all concepts): {user_message}",
+                system_prompt="You are a succinct extractor and format standardizer."
+            )
+            self.level = user_message_summary
+            self.user_states[self.chat_id]['level'] = user_message_summary
+            self.bot.send_message(self.chat_id, f"Perfect! Your level has been set to:\n {user_message_summary}"
+                                           f"\n\nPlease wait a second...")
+            logging.info(f"Level set for {self.chat_id}: {user_message_summary}")
+            # TODO async so it does not wait for this to finish
+            # Infer mastered content based on level
+            infered_master_content = self.model.call(
+                user_prompt=f"Given a {self.user_states[self.chat_id]['level']} proficiency level in {self.user_states[self.chat_id]['language']}, make a list of all the content "
+                            f"that a foreign language student should already know?",
+                system_prompt="You are a succinct assistant."
+            )
+            self.seen_content = [infered_master_content]
+            self.user_states[self.chat_id]['seen_content'] = [infered_master_content]
+            self._clean_mastered()  # Ensure this operates on user-specific data if needed
+            logging.info(f"Inferred seen content for {self.chat_id}.")
+            # Dump the current state to file
+            self.student_data_dump()
+        except Exception as err:
+            logging.error(f"Error processing level for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that level. Please try again.")
 
     def _handle_limitation_command(self, message: telebot.types.Message) -> None:
-        chat_id = message.chat.id
-        self.bot.send_message(chat_id, "Do you have any limitations I should be aware of?")
-        self.bot.register_next_step_handler(message, self._process_limitation_input) # Reuse existing processor
-        logging.info(f"User {chat_id} initiated /limitation command.")
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        self.bot.send_message(self.chat_id, "Do you have any limitations I should be aware of?")
+        user_message = message.text
+        print(111111111111111111111, user_message)
+        logging.info(f"User {self.chat_id} initiated /limitation command.")
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(self.chat_id, "Please provide any limitations or type 'None'. "
+                                           "Please try /limitation or /setup again.")
+            return
+        try:
+            user_message_summary = self.model.call(
+                user_prompt=f"This is the answer to the question 'do you have any limitation that restrains how a "
+                            f"language class might unfold?'. Output the clinical term of any limitation(s) along with "
+                            f"any necessary details (use as few words as possible to summarize all concepts): "
+                            f"{user_message}",
+                system_prompt="You are a succinct extractor and format standardizer."
+            )
+            self.limitation = user_message_summary
+            self.user_states[self.chat_id]['limitation'] = user_message_summary
+            self.bot.send_message(self.chat_id, f"Acknowledged. Your limitations: {user_message_summary}")
+            logging.info(f"Limitation set for {self.chat_id}: {user_message_summary}")
+            # Dump the current state to file
+            self.student_data_dump()
+        except Exception as err:
+            logging.error(f"Error processing limitation for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that limitation. Please try again.")
 
     def _handle_lesson_command(self, message: telebot.types.Message) -> None:
-        chat_id = message.chat.id
-        self.bot.send_message(chat_id, "About what do you want to learn? (Type 'no' to start from the beginning).")
-        self.bot.register_next_step_handler(message, self._process_lesson_preference_input) # Reuse existing processor
-        logging.info(f"User {chat_id} initiated /lesson command.")
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        user_message = message.text
+        self.bot.send_message(self.chat_id, "About what do you want to learn? (Type 'no' to start from the beginning).")
+        logging.info(f"User {self.chat_id} initiated /lesson command.")
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(self.chat_id, "Please provide a lesson preference or type 'no'.")
+            return
+        try:
+            llm_output = self.model.call(
+                user_prompt=f"This is the answer to the question 'about what do you want to learn?'. If it says 'no' it "
+                            f"means 'start from the beginning' Output a curriculum lesson name that matches it and any "
+                            f"details specified (use as few words as possible to summarize all concepts): {user_message}",
+                system_prompt="You are a succinct extractor and format standardizer. "
+                              "The beginner introduction class should "
+                              f"cover the language writing system and general orthography."
+            )
+            llm_output_converted = telegramify_markdown.markdownify(
+                llm_output,
+                max_line_length=None,
+                normalize_whitespace=False
+            )
+            self.user_states[self.chat_id]['next_lesson'] = llm_output
+
+            # Start lesson writer in a separate thread
+            lesson_maker_thread = threading.Thread(target=self._lesson_maker_thread)
+            lesson_maker_thread.daemon = True
+            lesson_maker_thread.start()
+            logging.info("Lesson make thread started.")
+
+            self.bot.send_message(self.chat_id, f"Okay, your lesson will be:\n{llm_output_converted}")
+            logging.info(f"Lesson preference set for {self.chat_id}: {llm_output}")
+            # Dump the current state to file
+            self.student_data_dump()
+        except Exception as err:
+            logging.error(f"Error processing lesson preference for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that. Consider /setup again.")
 
     def _handle_learned_command(self, message: telebot.types.Message) -> None:
-        chat_id = message.chat.id
-        self.bot.send_message(chat_id, "Please list all languages you already know.")
-        self.bot.register_next_step_handler(message, self._process_learned_languages_input) # Reuse existing processor
-        logging.info(f"User {chat_id} initiated /learned command.")
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        user_message = message.text
+        self.bot.send_message(self.chat_id, "Please list all languages you already know.")
+        logging.info(f"User {self.chat_id} initiated /learned command.")
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(self.chat_id, "Please list your known languages or type 'None'. Try /setup again.")
+            return
+        try:
+            lang_list = self.text2list(text=user_message,
+                                       prompt_intro="This is a sentence listing languages you already know. Extract "
+                                                    "all the languages mentioned.",
+                                       )
+            self.learned_languages = lang_list
+            self.user_states[self.chat_id]['learned_languages'] = lang_list
+            self.bot.send_message(self.chat_id, f"Got it. You know: {', '.join(lang_list)}.")
+            logging.info(f"Learned languages set for {self.chat_id}: {lang_list}")
+            # Dump the current state to file
+            self.student_data_dump()
+        except Exception as err:
+            logging.error(f"Error processing learned languages for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that. Please type /learned or "
+                                           "/start again.")
 
     def _handle_mastered_command(self, message: telebot.types.Message) -> None:
-        chat_id = message.chat.id
-        self.bot.send_message(chat_id, "Please list any other content you already know and do not wish to study again.")
-        self.bot.register_next_step_handler(message, self._process_mastered_content_input) # Reuse existing processor
-        logging.info(f"User {chat_id} initiated /mastered command.")
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        user_message = message.text
+        self.bot.send_message(self.chat_id, "Please list any other content you already know and do not wish to study again.")
+        logging.info(f"User {self.chat_id} initiated /mastered command.")
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(self.chat_id, "Please list mastered content or type 'None'. "
+                                                "Please type /mastered or /setup again.")
+            return
+        try:
+            user_list = self.text2list(text=user_message,
+                                       prompt_intro=f"This is the answer to the question 'what is the language content "
+                                                    f"you studied and know?'. Extract all the content mentioned (with "
+                                                    f"any necessary details). Everything must be written in "
+                                                    f"{self.user_states[self.chat_id]['language']}",
+                                       )
+            self.mastered += user_list
+            self.user_states[self.chat_id]['mastered'] = self.user_states[self.chat_id].get('mastered', []) + user_list
+            self._clean_mastered()  # Clean mastered content based on errors # TODO check if necessary #################################
+            self.bot.send_message(self.chat_id, f"Acknowledged. Mastered content added.")
+            logging.info(f"Mastered content set for {self.chat_id}.")
+            # Dump the current state to file
+            self.student_data_dump()
+        except Exception as err:
+            logging.error(f"Error processing mastered content for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble understanding that. "
+                                           "Please try /mastered or /setup again.")
 
     def _handle_reminder_command(self, message: telebot.types.Message) -> None:
-        chat_id = message.chat.id
-        self.bot.send_message(chat_id, "What time would you like to set the daily reminder (HH:MM UTC)? Or type 'no' to skip.")
-        self.bot.register_next_step_handler(message, self._process_reminder_time_input) # Reuse existing processor
-        logging.info(f"User {chat_id} initiated /reminder command.")
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        user_message = message.text.lower()
+        self.bot.send_message(self.chat_id, "What time would you like to set the daily reminder (HH:MM)? "
+                                       "Or type 'no' to skip.")
+        logging.info(f"User {self.chat_id} initiated /reminder command.")
+        if not user_message or user_message.startswith('/'):
+            self.bot.send_message(self.chat_id, "Please provide a time (HH:MM) or type 'no'. "
+                                           "Try /reminder or /setup again.")
+            return
+        try:
+            user_message_summary = self.model.call(
+                user_prompt=f"This is a sentence giving a time of day or saying no. If it says no, reply 'None', "
+                            f"otherwise extract the given time and return it in ISO 8601 format': {user_message}",
+                system_prompt="You are a succinct extractor and format standardizer."
+            )
+            if "None" in user_message_summary:
+                self.reminder_time = None
+                self.user_states[self.chat_id]['reminder_time'] = None
+                self.bot.send_message(self.chat_id, "Reminder skipped.")
+                logging.info(f"Reminder skipped for {self.chat_id}.")
+            else:
+                parsed_time = parser.parse(user_message_summary).strftime("%H:%M")
+                self.reminder_time = parsed_time
+                self.user_states[self.chat_id]['reminder_time'] = parsed_time
+                # Schedule the reminder, job will be stored in a user-specific way if needed for cancellation
+                job = schedule.every().day.at(parsed_time).do(self._send_reminder_callback)
+                # TODO check if true ############################################################
+                # Store job object if you want to cancel it later for this user
+                # For simplicity, if multiple users set reminders for the same time,
+                # schedule will create multiple jobs. If you need to track per-user jobs,
+                # you'd need a more complex structure in self.reminders.
+                # For now, let's assume reminder_job is for the current user's last set reminder.
+                self.reminder_job = job
+                self.bot.send_message(self.chat_id, f"Daily reminder set for {parsed_time}!")
+                logging.info(f"Reminder set for {self.chat_id} at {parsed_time}.")
+            # Dump the current state to file
+            self.student_data_dump()
+        except ValueError:
+            self.bot.send_message(self.chat_id, "Invalid time format. Please use HH:MM (e.g., 14:30) or type 'no'.")
+            self.bot.register_next_step_handler(message, self._process_reminder_time_input)  # Ask again
+            logging.warning(f"Invalid reminder time format from {self.chat_id}: {user_message}. Asking again.")
+        except Exception as err:
+            logging.error(f"Error processing reminder time for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I had trouble setting the reminder. "
+                                           "Please try /reminder or /setup again.")
 
-    def _clean_mastered(self, chat_id: int) -> None:
+    def _clean_mastered(self) -> None:
         """
         Given the newly learned content and the lesson errors, updates the mastered content.
         Operates on user-specific data.
         """
-        user_seen_content = self.user_states[chat_id].get('seen_content', [])
-        user_lesson_errors = self.user_states[chat_id].get('lesson_errors', [])
-        user_mastered = self.user_states[chat_id].get('mastered', [])
-        user_language = self.user_states[chat_id].get('language', 'English')  # Default for LLM prompt
+        user_seen_content = self.user_states[self.chat_id].get('seen_content', [])
+        user_lesson_errors = self.user_states[self.chat_id].get('lesson_errors', [])
+        user_mastered = self.user_states[self.chat_id].get('mastered', [])
+        user_language = self.user_states[self.chat_id].get('language', 'English')  # Default for LLM prompt
 
         try:
             user_list = self.text2list(
@@ -614,18 +1038,18 @@ class TelegramBot(IBot):
                              f"from the MASTERED_CONTENT list all content that the errors prove "
                              f"it is not mastered yet (take only into account serious errors).",
             )
-            self.user_states[chat_id]['mastered'] = user_list
-            logging.info(f"Mastered content cleaned for {chat_id}.")
+            self.user_states[self.chat_id]['mastered'] = user_list
+            logging.info(f"Mastered content cleaned for {self.chat_id}.")
         except Exception as err:
-            logging.error(f"Error cleaning mastered content for {chat_id}: {err}", exc_info=True)
+            logging.error(f"Error cleaning mastered content for {self.chat_id}: {err}", exc_info=True)
 
-    def _send_reminder_callback(self, chat_id: int) -> None:
+    def _send_reminder_callback(self) -> None:
         """
         Send a reminder message. This is called by the scheduler.
         """
         # Ensure reminder is sent only once per day per user
-        if not self.reminded_today.get(chat_id, False):
-            user_data = self.user_states.get(chat_id, {})
+        if not self.reminded_today.get(self.chat_id, False):
+            user_data = self.user_states.get(self.chat_id, {})
             user_seen_content = user_data.get('seen_content', [])
             user_language = user_data.get('language', 'English')
             user_level = user_data.get('level', 'Beginner')
@@ -641,11 +1065,11 @@ class TelegramBot(IBot):
                                 f"aligned with the level of the user.",
                     system_prompt="You are a succinct teaching assistant writing a text message."
                 )
-                self.bot.send_message(chat_id, reminder_text)
-                self.reminded_today[chat_id] = True # Mark as reminded for today
-                logging.info(f"Sent reminder to chat ID {chat_id}.")
+                self.bot.send_message(self.chat_id, reminder_text)
+                self.reminded_today[self.chat_id] = True # Mark as reminded for today
+                logging.info(f"Sent reminder to chat ID {self.chat_id}.")
             except Exception as err:
-                logging.error(f"Error sending reminder to chat ID {chat_id}: {err}", exc_info=True)
+                logging.error(f"Error sending reminder to chat ID {self.chat_id}: {err}", exc_info=True)
                 # If bot was blocked by user, schedule.CancelJob can be returned by the job itself
                 # if the exception is caught there.
 
@@ -655,14 +1079,15 @@ class TelegramBot(IBot):
         """
         Handles '/new' command. Generates a new lesson curriculum.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
         # Ensure user data is available
-        if chat_id not in self.user_states or 'language' not in self.user_states[chat_id]:
-            self.bot.send_message(chat_id, "Please complete the setup first by typing /setup.")
-            logging.warning(f"User {chat_id} tried /new without setup.")
+        if not self.language and not self.level:
+            self.bot.send_message(self.chat_id, "Please complete the setup first by typing /setup.")
+            logging.warning(f"User {self.chat_id} tried /new without setup.")
             return
 
-        user_data = self.user_states[chat_id]
+        user_data = self.user_states[self.chat_id]
         user_language = user_data['language']
         user_level = user_data['level']
         user_limitation = user_data.get('limitation', 'None')
@@ -688,48 +1113,54 @@ class TelegramBot(IBot):
                               f"of step-by-step sections for a class.",
             )
             if not lesson_content_list:
-                self.bot.send_message(chat_id, "Could not generate lesson sections. Please try again.")
-                logging.error(f"LLM returned empty lesson_content_list for {chat_id}.")
+                self.bot.send_message(self.chat_id, "Could not generate lesson sections. Please try again.")
+                logging.error(f"LLM returned empty lesson_content_list for {self.chat_id}.")
                 return
 
             self.lesson_sections = lesson_content_list
-            self.user_states[chat_id]['lesson_sections'] = lesson_content_list
-            self.bot.send_message(chat_id, f"We are preparing your lesson.\n"
+            self.user_states[self.chat_id]['lesson_sections'] = lesson_content_list
+            self.bot.send_message(self.chat_id, f"We are preparing your lesson.\n"
                                            f"Wait for a moment please...")
-            logging.info(f"New lesson '{current_lesson_name}' started for {chat_id}.")
+            logging.info(f"New lesson '{current_lesson_name}' started for {self.chat_id}.")
 
             # Update seen_content with the new lesson topic
             self.seen_content.append(current_lesson_name)
-            self.user_states[chat_id]['seen_content'] = self.user_states[chat_id].get('seen_content', []) + [current_lesson_name]
+            self.user_states[self.chat_id]['seen_content'] = self.user_states[self.chat_id].get('seen_content', []) + [current_lesson_name]
 
             # Determine the next lesson topic for future use
             next_lesson_topic = self.model.call(
                 user_prompt=f"You are teaching a {user_language} class in writing form. "
                             f"You must determine what is the next lesson to study, given your students have already "
-                            f"learned about the following:\n{', '.join(self.user_states[chat_id]['seen_content'])}",
+                            f"learned about the following:\n{', '.join(self.user_states[self.chat_id]['seen_content'])}",
                 system_prompt=f"You are a succinct language teacher assistant",
             )
-            self.next_lesson = next_lesson_topic
-            self.user_states[chat_id]['next_lesson'] = next_lesson_topic
-            logging.info(f"Next lesson determined for {chat_id}: {next_lesson_topic}")
+            self.user_states[self.chat_id]['next_lesson'] = next_lesson_topic
+            logging.info(f"Next lesson determined for {self.chat_id}: {next_lesson_topic}")
+
+            # Start lesson writer in a separate thread
+            lesson_maker_thread = threading.Thread(target=self._lesson_maker_thread)
+            lesson_maker_thread.daemon = True
+            lesson_maker_thread.start()
+            logging.info("Lesson make thread started.")
 
             # Move to the first section of the lesson
             self._handle_next_section_content(message)  # Call directly to send first section
             # self.bot.register_next_step_handler(message, next_step_callable) # Only register if you want to wait for user to type /next
-            logging.info(f"Initiated first lesson section for {chat_id}.")
+            logging.info(f"Initiated first lesson section for {self.chat_id}.")
 
         except Exception as err:
-            logging.error(f"Error handling /new lesson for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I couldn't start a new lesson. Please try again.")
+            logging.error(f"Error handling /new lesson for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I couldn't start a new lesson. Please try again.")
 
     def _handle_next_section_command(self, message: telebot.types.Message) -> None:
         """
         Handles '/next' command. Proceeds to the next section of the current lesson.
         This is a direct command handler, not a next_step_handler.
         """
-        chat_id = message.chat.id
-        if chat_id not in self.user_states or 'lesson_sections' not in self.user_states[chat_id]:
-            self.bot.send_message(chat_id, "Please start a lesson first with /new.")
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        if not self.lesson_sections:
+            self.bot.send_message(self.chat_id, "Please start a lesson first by typing '/new'.")
             return
 
         self.lesson_history.append({"role": "user", "content": "/next"})  # Add to history
@@ -739,100 +1170,46 @@ class TelegramBot(IBot):
         """
         Internal function to send the next lesson section content.
         """
-        chat_id = message.chat.id
-        user_data = self.user_states[chat_id]
-        lesson_sections = user_data.get('lesson_sections', [])
-
-        if not lesson_sections:
-            self.bot.send_message(chat_id, "You've completed all sections for this lesson! "
-                                           "Type /new to start a new lesson.")
-            logging.info(f"All lesson sections completed for {chat_id}.")
-            return
-
-        # Use pop(0) to get the first element and remove it (queue-like behavior)
-        lesson_elem = lesson_sections.pop(0)
-        user_data['lesson_sections'] = lesson_sections  # Update the user's state
-
-        # Prepare LLM prompt with user-specific data
-        course_language = user_data['language']
-        user_level = user_data['level']
-        user_limitation = user_data.get('limitation', 'None')
-        user_learned_languages = user_data.get('learned_languages', ['english (default)'])
-        user_mastered = user_data.get('mastered', [])
-        user_seen_content = user_data.get('seen_content', [])
-        user_errors = user_data.get('lesson_errors', [])
-        current_lesson_name = user_data.get('next_lesson', 'Current Topic')  # Use next_lesson as current topic
-
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
+        
         try:
-            lesson_content = self.model.call(
-                user_prompt=f"You are teaching a {course_language} class for a student of "
-                            f"level {self.level}. You must teach about {lesson_elem}."
-                            f"If it matches the subject, you should focus on practicing one or more of the "
-                            f"following abilities {random.choices(self.abilities, k=4)}.\n"
-                            f"The student only knows about:"
-                            f"Previous lessons: {', '.join(user_seen_content)}\n"
-                            f"Mastered content: {', '.join(user_mastered)}\n",
-                system_prompt=f"You are a great foreign language teacher teaching a 1-on-1 {course_language} class ",
-                history=self.lesson_history 
-                # max_tokens=3000,  # Limit the response length
-            )
-            self.bot.send_message(chat_id, "⏳ Halfway done...")
-            lesson_content = self.model.call(
-                user_prompt=f"You are adapting the following {course_language} class to some specifications. "
-                            f"The level is {user_level}. "
-                            f"Use emojis and simple ASCII pictures to illustrate concepts, actions and ideas. "
-                            f"The lesson's content must be in {course_language}."
-                            f"HOWEVER, explanations and instructions must be in English for beginner levels "
-                            f"and in {course_language} for higher levels.\n"
-                            f"CLASS:\n{lesson_content}\n",
-                system_prompt=f"You are a foreign language teacher that uses a textual medium to teach their class. "
-                              f"Use raw markdown formatting.",
-                history=self.lesson_history 
-            )
-            self.bot.send_message(chat_id, "⌛ Almost done...")
-            lesson_content = self.model.call(
-                user_prompt=f"You are adapting the following class to your specific "
-                            f"student's profile:\n"
-                            f"Limitations: {user_limitation}\nOther known languages:{', '.join(user_learned_languages)}\n"
-                            f"Mastered content: {', '.join(user_mastered)}\n"
-                            f"Errors and weaknesses: {', '.join(user_errors)}\n"                            
-                            f"You may compare to other languages the student knows: "
-                            f"{', '.join(user_data.get('learned_languages', ['English']))}.\n "
-                            f"CLASS:\n{lesson_content}\n",
-                system_prompt=f"You are a {course_language} teacher adapting his a lesson to its student's profile."
-                              f"Structure must be clean and simple, foreigner-friendly and kid-friendly. "
-                              f"Use raw markdown formatting.",
-                history=self.lesson_history 
-            )
+            while True:
+                if self.current_lesson is None:
+                    time.sleep(1)
+                else:
+                    lesson_content = self.current_lesson
+                    break
             converted_content = telegramify_markdown.markdownify(
                 lesson_content,
                 max_line_length=None,
                 normalize_whitespace=False
             )
-            self.bot.send_message(chat_id, converted_content)
+            self.bot.send_message(self.chat_id, converted_content)
             self.lesson_history.append({"role": "system", "content": lesson_content})
-            logging.info(f"Sent lesson section '{lesson_elem}' to {chat_id}.")
+            logging.info(f"Sent lesson to {self.chat_id}.")
 
             # Send reminder of commands
-            self.bot.send_message(chat_id, "Type '/next' to move forward, '/more' to get more details, "
+            self.bot.send_message(self.chat_id, "Type '/next' to move forward, '/more' to get more details, "
                                            "'/better' for a clearer version, '/question' to ask a question, "
                                            "'/conversation' to start a conversation.")
         except Exception as err:
-            logging.error(f"Error generating/sending lesson section for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I couldn't generate the next lesson section. Please try /next again.")
+            logging.error(f"Error generating/sending lesson section for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I couldn't generate the next lesson section. Please try /next again.")
 
     def _handle_more_details_command(self, message: telebot.types.Message) -> None:
         """
         Handles '/more' command. Gets more details on the last lesson content.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
         if not self.lesson_history:
-            self.bot.send_message(chat_id, "There's no active lesson to get more details about. "
+            self.bot.send_message(self.chat_id, "There's no active lesson to get more details about. "
                                            "Please start a lesson with /new.")
             return
 
         self.lesson_history.append({"role": "user", "content": "/more"})
-        user_data = self.user_states[chat_id]
+        user_data = self.user_states[self.chat_id]
         user_language = user_data.get('language', 'English')
         try:
             lesson_content = self.model.call(
@@ -854,28 +1231,29 @@ class TelegramBot(IBot):
                 max_line_length=None,
                 normalize_whitespace=False
             )
-            self.bot.send_message(chat_id, converted_content)
+            self.bot.send_message(self.chat_id, converted_content)
             self.lesson_history.append({"role": "system", "content": lesson_content})
-            logging.info(f"Sent more details to {chat_id}.")
-            self.bot.send_message(chat_id, "Type '/next' to move forward, '/more' to get more details, "
+            logging.info(f"Sent more details to {self.chat_id}.")
+            self.bot.send_message(self.chat_id, "Type '/next' to move forward, '/more' to get more details, "
                                            "'/better' for a clearer version, '/question' to ask a question, "
                                            "'/conversation' to start a conversation.")
         except Exception as err:
-            logging.error(f"Error handling /more for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I couldn't provide more details. Please try again.")
+            logging.error(f"Error handling /more for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I couldn't provide more details. Please try again.")
 
     def _handle_better_explanation_command(self, message: telebot.types.Message) -> None:
         """
         Handles '/better' command. Provides a clearer version of the last lesson content.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
         if not self.lesson_history:
-            self.bot.send_message(chat_id, "There's no active lesson to explain better. "
+            self.bot.send_message(self.chat_id, "There's no active lesson to explain better. "
                                            "Please start a lesson with /new.")
             return
 
         self.lesson_history.append({"role": "user", "content": "/better"})
-        user_data = self.user_states[chat_id]
+        user_data = self.user_states[self.chat_id]
         user_language = user_data.get('language', 'English')
         try:
             lesson_content = self.model.call(
@@ -898,28 +1276,29 @@ class TelegramBot(IBot):
                 max_line_length=None,
                 normalize_whitespace=False
             )
-            self.bot.send_message(chat_id, converted_content)
+            self.bot.send_message(self.chat_id, converted_content)
             self.lesson_history.append({"role": "system", "content": lesson_content})
-            logging.info(f"Sent better explanation to {chat_id}.")
-            self.bot.send_message(chat_id, "Type '/next' to move forward, '/more' to get more details, "
+            logging.info(f"Sent better explanation to {self.chat_id}.")
+            self.bot.send_message(self.chat_id, "Type '/next' to move forward, '/more' to get more details, "
                                            "'/better' for a clearer version, '/question' to ask a question, "
                                            "'/conversation' to start a conversation.")
         except Exception as err:
-            logging.error(f"Error handling /better for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I couldn't provide a clearer explanation. Please try again.")
+            logging.error(f"Error handling /better for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I couldn't provide a clearer explanation. Please try again.")
 
     def _handle_question_command(self, message: telebot.types.Message) -> None:
         """
         Handles '/question' command. Prompts user for their question.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
         if not self.lesson_history:
-            self.bot.send_message(chat_id, "There's no active lesson to ask a question about. "
+            self.bot.send_message(self.chat_id, "There's no active lesson to ask a question about. "
                                            "Please start a lesson with /new.")
             return
 
         self.lesson_history.append({"role": "user", "content": "/question"})
-        user_data = self.user_states[chat_id]
+        user_data = self.user_states[self.chat_id]
         user_language = user_data.get('language', 'English')
         try:
             please_ask_your_question = self.model.call(
@@ -933,25 +1312,26 @@ class TelegramBot(IBot):
                 max_line_length=None,
                 normalize_whitespace=False
             )
-            self.bot.send_message(chat_id, converted_please_ask_your_question)
+            self.bot.send_message(self.chat_id, converted_please_ask_your_question)
             # Register next step to get the actual question
-            self.bot.register_next_step_handler(message, partial(self._process_user_question, chat_id))
-            logging.info(f"Prompted {chat_id} to ask question.")
+            self.bot.register_next_step_handler(message, self._process_user_question)
+            logging.info(f"Prompted {self.chat_id} to ask question.")
         except Exception as err:
-            logging.error(f"Error prompting for question for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I couldn't prepare for your question. Please try again.")
+            logging.error(f"Error prompting for question for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I couldn't prepare for your question. Please try again.")
 
-    def _process_user_question(self, chat_id: int, message: telebot.types.Message) -> None:
+    def _process_user_question(self, msg: telebot.types.Message) -> None:
         """
         Processes the user's actual question and provides an answer.
         """
-        user_question = message.text
+        user_question = msg.text
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
         if not user_question or user_question.startswith('/'):
-            self.bot.send_message(chat_id, "That doesn't look like a valid question. Please try /question again.")
+            self.bot.send_message(self.chat_id, "That doesn't look like a valid question. Please try /question again.")
             return
 
         self.lesson_history.append({"role": "user", "content": user_question}) # Add actual question to history
-        user_data = self.user_states[chat_id]
+        user_data = self.user_states[self.chat_id]
         user_language = user_data.get('language', 'English')
         try:
             question_answer = self.model.call(
@@ -968,29 +1348,29 @@ class TelegramBot(IBot):
                 max_line_length=None,
                 normalize_whitespace=False
             )
-            self.bot.send_message(chat_id, converted_content)
+            self.bot.send_message(self.chat_id, converted_content)
             self.lesson_history.append({"role": "system", "content": question_answer})
-            logging.info(f"Answered question for {chat_id}.")
-            self.bot.send_message(chat_id, "Type '/next' to move forward, '/more' to get more details, "
+            logging.info(f"Answered question for {self.chat_id}.")
+            self.bot.send_message(self.chat_id, "Type '/next' to move forward, '/more' to get more details, "
                                            "'/better' for a clearer version, '/question' to ask a question, "
                                            "'/conversation' to start a conversation.")
         except Exception as err:
-            logging.error(f"Error answering question for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I couldn't answer your question. Please try again.")
+            logging.error(f"Error answering question for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I couldn't answer your question. Please try again.")
 
-
-    def _handle_conversation_command(self, message: telebot.types.Message) -> None:
+    def _handle_conversation_command(self, msg: telebot.types.Message) -> None:
         """
         Handles '/conversation' command. Prompts user for a role or to type 'no'.
         """
-        chat_id = message.chat.id
+        self.chat_id = msg.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
         if not self.lesson_history:
-            self.bot.send_message(chat_id, "There's no active lesson to start a conversation about. "
+            self.bot.send_message(self.chat_id, "There's no active lesson to start a conversation about. "
                                            "Please start a lesson with /new.")
             return
 
         self.lesson_history.append({"role": "user", "content": "/conversation"})
-        user_data = self.user_states[chat_id]
+        user_data = self.user_states[self.chat_id]
         user_language = user_data.get('language', 'English')
         try:
             personna_request = self.model.call(
@@ -999,24 +1379,24 @@ class TelegramBot(IBot):
                             f"Say it in {user_language}, {', '.join(user_data.get('learned_languages', ['English']))}",
                 system_prompt=f"You are a succinct assistant.",
             )
-            self.bot.send_message(chat_id, personna_request)
+            self.bot.send_message(self.chat_id, personna_request)
             # Register next step to get the role or 'no'
-            self.bot.register_next_step_handler(message, partial(self._process_conversation_role, chat_id))
-            logging.info(f"Prompted {chat_id} for conversation role.")
+            self.bot.register_next_step_handler(msg, self._process_conversation_role)
+            logging.info(f"Prompted {self.chat_id} for conversation role.")
         except Exception as err:
-            logging.error(f"Error prompting for conversation role for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I couldn't start a conversation. Please try again.")
+            logging.error(f"Error prompting for conversation role for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I couldn't start a conversation. Please try again.")
 
-    def _process_conversation_role(self, chat_id: int, message: telebot.types.Message) -> None:
+    def _process_conversation_role(self, message: telebot.types.Message) -> None:
         """
         Processes the user's chosen role for conversation and starts it.
         """
         user_role_choice = message.text
         if not user_role_choice or user_role_choice.startswith('/'):
-            self.bot.send_message(chat_id, "That doesn't look like a valid role. Please try /conversation again.")
+            self.bot.send_message(self.chat_id, "That doesn't look like a valid role. Please try /conversation again.")
             return
 
-        user_data = self.user_states[chat_id]
+        user_data = self.user_states[self.chat_id]
         user_level = user_data.get('level', 'Beginner')
         user_language = user_data.get('language', 'English')
         try:
@@ -1043,35 +1423,35 @@ class TelegramBot(IBot):
                 max_line_length=None,
                 normalize_whitespace=False
             )
-            self.bot.send_message(chat_id, "You have now started a conversation, to quit it type /exit.")
-            self.bot.send_message(chat_id, converted_content)
+            self.bot.send_message(self.chat_id, "You have now started a conversation, to quit it type /exit.")
+            self.bot.send_message(self.chat_id, converted_content)
             self.lesson_history.append({"role": "system", "content": conversation_starter})
 
             # Register next step
-            self.bot.register_next_step_handler(message, partial(self._continue_conversation, chat_id))
-            logging.info(f"Started conversation for {chat_id} with role '{user_role_choice}'.")
+            self.bot.register_next_step_handler(message, self._continue_conversation)
+            logging.info(f"Started conversation for {self.chat_id} with role '{user_role_choice}'.")
         except Exception as err:
-            logging.error(f"Error starting conversation for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I couldn't start a conversation. Please try again.")
+            logging.error(f"Error starting conversation for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I couldn't start a conversation. Please try again.")
 
-    def _continue_conversation(self, chat_id: int, message: telebot.types.Message) -> None:
+    def _continue_conversation(self, message: telebot.types.Message) -> None:
         """
         Processes the user's input during an ongoing conversation.
         """
         user_role_choice = message.text
         if '/exit' in user_role_choice.lower():
-            self.bot.send_message(chat_id, "You have exited the conversation. "
+            self.bot.send_message(self.chat_id, "You have exited the conversation. "
                                            "Type /conversation to start a new one or type /new, /next, /more, /better, "
                                            "or /question to go back to the current lesson.")
-            logging.info(f"User {chat_id} exited the conversation.")
+            logging.info(f"User {self.chat_id} exited the conversation.")
             return
         elif not user_role_choice or user_role_choice.startswith('/'):
-            self.bot.send_message(chat_id, "I'm sorry, I do not understand that command. "
+            self.bot.send_message(self.chat_id, "I'm sorry, I do not understand that command. "
                                            "Please start over by typing /conversation or "
                                            "check the list of commands by typing /help.")
             return
 
-        user_data = self.user_states[chat_id]
+        user_data = self.user_states[self.chat_id]
         user_level = user_data.get('level', 'Beginner')
         user_language = user_data.get('language', 'English')
         leitmotiv = (f" The topics the conversation should cover are: {', '.join(self.seen_content)}, "
@@ -1090,87 +1470,89 @@ class TelegramBot(IBot):
                 max_line_length=None,
                 normalize_whitespace=False
             )
-            self.bot.send_message(chat_id, converted_conversation_follow_up)
+            self.bot.send_message(self.chat_id, converted_conversation_follow_up)
             self.lesson_history.append({"role": "system", "content": conversation_follow_up})
 
             # Register next step
-            self.bot.register_next_step_handler(message, partial(self._continue_conversation, chat_id))
-            logging.info(f"Started conversation for {chat_id} with role '{user_role_choice}'.")
+            self.bot.register_next_step_handler(message, self._continue_conversation)
+            logging.info(f"Started conversation for {self.chat_id} with role '{user_role_choice}'.")
         except Exception as err:
-            logging.error(f"Error starting conversation for {chat_id}: {err}", exc_info=True)
-            self.bot.send_message(chat_id, "Sorry, I couldn't start a conversation. Please try again.")
+            logging.error(f"Error starting conversation for {self.chat_id}: {err}", exc_info=True)
+            self.bot.send_message(self.chat_id, "Sorry, I couldn't start a conversation. Please try again.")
 
     def _handle_data_command(self, message: telebot.types.Message) -> None:
         """
         Handles the '/data' command, providing the personal data about the user.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
+        self.student_data_load()  # restore the attribute data (in case set to default by timeout)
         data_text = (
             f"Here is the data that you provided:\n\n"
-            f"🔖 Language - {self.language}\n"
-            f"🔖 Level - {self.level}\n"
-            f"🔖 Personal limitations - {self.limitation}\n"
-            f"🔖 Previously studied languages - {', '.join(self.learned_languages)}\n"
-            f"🔖 Daily reminder - {self.reminder_time}\n"
-            f"🔖 Mastered content - {', '.join(self.mastered)}\n"
-            f"🔖 Previously studied lessons - {', '.join(self.seen_content)}\n"
+            f"🧑 Name - {self.name}\n"
+            f"📝 Language - {self.language}\n"
+            f"📐 Level - {self.level}\n"
+            f"🩹 Personal limitations - {self.limitation}\n"
+            f"👅 Previously studied languages - {', '.join(self.learned_languages)}\n"
+            f"📅 Daily reminder - {self.reminder_time}\n"
+            f"🏆 Mastered content - {', '.join(self.mastered)}\n"
+            f"📚 Previously studied lessons - {', '.join(self.seen_content)}\n"
         )
-        self.bot.send_message(chat_id, data_text)
-        logging.info(f"Sent /data to chat ID: {chat_id}")
+        self.bot.send_message(self.chat_id, data_text)
+        logging.info(f"Sent /data to chat ID: {self.chat_id}")
 
     def _handle_help_command(self, message: telebot.types.Message) -> None:
         """
         Handles the '/help', '/info', '/documentation' command, providing a list and explanation of available commands.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         help_text = (
             "Here are the commands you can use:\n\n"
-            "📌 /language - Change the language you are learning.\n"
-            "📌 /level - Update your language proficiency level.\n"
-            "📌 /limitation - Update any learning limitations.\n"
-            "📌 /lesson - Choose a specific lesson topic.\n"
-            "📌 /learned - List languages you already know.\n"
-            "📌 /mastered - List content you've already mastered.\n"
-            "📌 /reminder - Set or change your daily study reminder time.\n\n"
-            "📌 /setup - Begin or restart the language setup (questions).\n"
-            "    📌 /new or /start - Start a brand new lesson.\n"
-            "    📌 /next - Move to the next section of the current lesson.\n"
-            "    📌 /more - Get more details on the current lesson content.\n"
-            "    📌 /better - Get a simpler explanation of the current content.\n"
-            "    📌 /question - Ask a question about the current lesson.\n"
-            "📌 /conversation - Start a conversation practice.\n\n"
-            "    📌 /exit - Exit the conversation practice.\n\n"
-            "📌 /data - Shows the data used to tailor the lessons to your needs.\n\n"
-            "📌 /help or /info or /documentation - Show this list of commands."
+            "🔴 /setup - Begin or restart the language setup (questions).\n"
+            "  ⭕ /new or /start - Start a brand new lesson.\n"
+            "  ⭕ /next - Move to the next section of the current lesson.\n"
+            "  ⭕ /more - Get more details on the current lesson content.\n"
+            "  ⭕ /better - Get a simpler explanation of the current content.\n"
+            "  ⭕ /question - Ask a question about the current lesson.\n"            
+            "🔴 /conversation - Start a conversation practice.\n\n"
+            "  ⭕ /exit - Exit the conversation practice.\n\n"
+            "🔴 /language - Change the language you are learning.\n"
+            "🔴 /level - Update your language proficiency level.\n"
+            "🔴 /limitation - Update any learning limitations.\n"
+            "🔴 /lesson - Choose a specific lesson topic.\n"
+            "🔴 /learned - List languages you already know.\n"
+            "🔴 /mastered - List content you've already mastered.\n"
+            "🔴 /reminder - Set or change your daily study reminder time.\n\n"
+            "🔴 /data - Shows the data used to tailor the lessons to your needs.\n\n"
+            "🔴 /help or /info or /documentation - Show this list of commands."
         )
-        self.bot.send_message(chat_id, help_text)
-        logging.info(f"Sent /help to chat ID: {chat_id}")
+        self.bot.send_message(self.chat_id, help_text)
+        logging.info(f"Sent /help to chat ID: {self.chat_id}")
 
     def _handle_all_messages(self, message: telebot.types.Message) -> None:
         """
         Generic handler for all other text messages not caught by specific handlers.
         """
-        chat_id = message.chat.id
+        self.chat_id = message.chat.id
         user_text = message.text
-        logging.info(f"Received unhandled message '{user_text}' from chat ID: {chat_id}")
+        logging.info(f"Received unhandled message '{user_text}' from chat ID: {self.chat_id}")
 
         # If a next_step_handler is active, it will override this.
         # This handler only fires if no specific command or next_step_handler is waiting.
         self.bot.send_message(
-            chat_id,
+            self.chat_id,
             f"I'm not sure how to respond to '{user_text}'. "
-            "If you're in the middle of a setup, please provide the expected input. "
+            "If this is your first time, type the command /setup. "
             "Otherwise, type /help to see all available commands."
         )
 
     # --- IBot Interface Implementations ---
-    def send(self, chat_id: int, message_content: str) -> str:
+    def send(self, message_content: str) -> str:
         try:
-            self.bot.send_message(chat_id, message_content)
-            logging.info(f"Sent message to chat ID {chat_id}: '{message_content}'")
+            self.bot.send_message(self.chat_id, message_content)
+            logging.info(f"Sent message to chat ID {self.chat_id}: '{message_content}'")
             return "Message sent successfully."
         except Exception as err:
-            logging.error(f"Failed to send message to chat ID {chat_id}: {err}")
+            logging.error(f"Failed to send message to chat ID {self.chat_id}: {err}")
             return f"Failed to send message: {err}"
 
     def get(self) -> str:
