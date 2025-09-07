@@ -18,7 +18,7 @@ import telegramify_markdown
 from telegramify_markdown import customize
 
 from FLteach.bot.bot import IBot
-from FLteach.llm.openai_api import OpenaiApi
+from FLteach.teacher.sequential_teacher import LLMService
 
 # Configure telegramify_markdown
 customize.Symbol.head_level_1 = "📌"
@@ -30,7 +30,6 @@ customize.cite_expandable = True
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
 
-
 # TODO: homework and error update
 # TODO: add oral comprehension and oral production
 # TODO: llm mapping from free text to functions
@@ -38,16 +37,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class TelegramBot(IBot):
     """
     A simple Telegram bot class that uses the Telebot library.
-    It initializes the bot with a Telegram API token (https://core.telegram.org/bots#how-do-i-create-a-bot)
-    and an OpenAI API key (https://platform.openai.com/settings/organization/api-keys)
-    given as arguments or from environment variables (TELEGRAM_BOT_TOKEN and OPENAI_API_KEY respectively).
+    It initializes the bot with a Telegram API token and an LLM service.
     """
     def __init__(self,
                  telegram_api_key_or_path: str | None = None,
                  model_api_key_or_path: str | None = None,
                  ) -> None:
         """
-        Initializes the Telegram bot with the token from environment variables.
+        Initializes the Telegram bot and the LLM service.
         """
         self.telegram_api_key: str
         if telegram_api_key_or_path is not None and os.path.isfile(telegram_api_key_or_path):
@@ -56,7 +53,7 @@ class TelegramBot(IBot):
         elif isinstance(telegram_api_key_or_path, str):
             self.telegram_api_key = telegram_api_key_or_path
         else:
-            self.telegram_api_key = os.environ.get("TELEGRAM_BOT_TOKEN", "") # Corrected env var name
+            self.telegram_api_key = os.environ.get("TELEGRAM_BOT_TOKEN", "")
             if not self.telegram_api_key:
                 raise ValueError(
                     "Telegram bot token not found. Please provide it as an argument "
@@ -64,6 +61,9 @@ class TelegramBot(IBot):
                 )
 
         self.bot = self.initialize_bot()
+
+        # Instantiate the LLM service to handle all LLM-related tasks
+        self.llm_service = LLMService(model_api_key_or_path=model_api_key_or_path)
 
         # User-specific state management for multi-step conversations
         # {self.chat_id: {'step': 'current_step_name', 'data': {key: value}}}
@@ -89,32 +89,7 @@ class TelegramBot(IBot):
         self.seen_content: List[str] = []  # Content covered in lessons
         self.mastered: List[str] = []  # Content user has mastered
 
-        self.model = OpenaiApi(api_key_or_path=model_api_key_or_path)
         self._register_handlers()
-
-    def text2list(self,
-                  text: str,
-                  prompt_intro: str | None = None,
-                  system_prompt: str = "You are a succinct element extractor, and format standardizer.",
-                  ) -> List[str]:
-        """
-        Uses the LLM to extract a list of strings from text.
-        """
-        user_message_summary = ""
-        prompt_intro = "Extract all listed elements and return them as a JSON array of strings" if prompt_intro is None else prompt_intro
-        try:
-            user_message_summary = self.model.call(
-                user_prompt=f"{prompt_intro}: {text}",
-                system_prompt=f"{system_prompt} Return a JSON array of strings."
-            )
-            user_message_summary = re.findall(r'(?<=```json).+(?=```)', user_message_summary, flags=re.DOTALL)
-            return json.loads(user_message_summary[0])
-        except json.JSONDecodeError as err:
-            logging.error(f"Failed to decode JSON from LLM: {err}. Raw response: {user_message_summary}")
-            return []  # Return empty list on failure
-        except Exception as err:
-            logging.error(f"Error in text2list LLM call: {err}", exc_info=True)
-            return []
 
     def student_data_dump(self,
                           ) -> None:
@@ -130,7 +105,7 @@ class TelegramBot(IBot):
         # Save all attributes of the class to a dictionary
         values_to_save = {}
         for attr in dir(self):
-            if not callable(getattr(self, attr)) and not attr.startswith("__") and attr not in ["model", "bot",
+            if not callable(getattr(self, attr)) and not attr.startswith("__") and attr not in ["llm_service", "bot",
                                                                                                 "_abc_impl",
                                                                                                 "reminder_job"]:
                 values_to_save[attr] = getattr(self, attr)
@@ -209,73 +184,6 @@ class TelegramBot(IBot):
             schedule.run_pending()
             time.sleep(1)  # Check every second
 
-    def lesson_maker(self,
-                     course_language: str,
-                     user_limitation: str,
-                     lesson_elem: str,
-                     instruction_language: str,
-                     user_seen_content: List,
-                     user_mastered: List,
-                     user_level: str,
-                     revision_bool: bool,
-                     ) -> str:
-        lesson_content = ""
-        # previous content revision
-        if revision_bool:
-            revision_content = self.text2list(", ".join(user_seen_content + user_mastered),
-                                              f"Extract from the list all the topics that can be useful "
-                                              f"as a base to learn about {lesson_elem}")
-            revision_content = revision_content if revision_content is not None else user_seen_content + user_mastered
-            lesson_content = self.model.call(
-                user_prompt=f"You are teaching a {course_language} class."
-                            f"The instructions and explanations must be foreigner-friendly/kid-friendly and "
-                            f"written in a version of {instruction_language} so simple, a 7 years old should be able "
-                            f"to read it. "
-                            f"Do not write direct translations of the content, you may use emojis to illustrate."
-                            f"As a way to start the class, make "
-                            f"a very short, simple, and clear introductory revision of previously seen content: "
-                            f"{random.choice(revision_content)}",
-                system_prompt=f"You are a succinct  foreign language teacher teaching a 1-on-1 {course_language} "
-                              f"class to your student {self.name} (LEVEL: {self.level}, LIMITATION: {user_limitation}).",
-                history=self.lesson_history
-                # max_tokens=3000,  # Limit the response length
-            )
-            lesson_content += "\n\n"
-        # new content presentation
-        content_presentation = self.model.call(
-            user_prompt=f"You are teaching a {course_language} class. The topic of the class is {lesson_elem}. "
-                        f"The instructions and explanations must be foreigner-friendly/kid-friendly and "
-                        f"written in a version of {instruction_language} so simple, a 7 years old should be able "
-                        f"to read it. "
-                        f"The lesson's new content must be in {course_language}."                        
-                        f"Do not write direct translations of the content, you may use emojis to illustrate. "
-                        f"Make a simple and clear explanation of the topic and a schematic "
-                        f"presentation of the content. Do not make practice exercises, someone else is in charge of "
-                        f"those. Instead of figures, add emojis and simple ASCII pictures to ease the semantic "
-                        f"understanding by illustrating concepts, actions, persons, etc.",
-            system_prompt=f"You are a succinct  foreign language teacher teaching a 1-on-1 {course_language} class"
-                          f" to your student {self.name} (LEVEL: {self.level}, LIMITATION: {user_limitation}).",
-            history=self.lesson_history
-            # max_tokens=3000,  # Limit the response length
-        )
-        lesson_content += f"{content_presentation}\n\n"
-        # add exercices
-        lesson_content += self.model.call(
-            user_prompt=f"You are teaching a {course_language} class. The topic of the class is {lesson_elem}. "
-                        f"The instructions and explanations must be foreigner-friendly/kid-friendly and "
-                        f"written in a simple version of {instruction_language}. The content to exercise must be "
-                        f"in {course_language}. "
-                        f"Make 4 exercises that practice each of the skills: Listening comprehension, Oral production, "
-                        f"Reading comprehension, Written production. "
-                        f"The exercises must practice the following content: {content_presentation}",
-            system_prompt=f"You are a succinct foreign language teacher teaching a 1-on-1 {course_language} class through a "
-                          f"text messaging app for {self.name} (LEVEL: {self.level}, LIMITATION: {user_limitation}).",
-            history=self.lesson_history
-            # max_tokens=3000,  # Limit the response length
-        )
-        lesson_content += "\n\n"
-        return lesson_content
-
     def _lesson_maker_thread(self):
         """
         Function to run the lesson maker loop in a separate thread.
@@ -305,26 +213,38 @@ class TelegramBot(IBot):
         # TODO add error correction and compilation in class object
         user_errors = user_data.get('lesson_errors', [])
         # TODO: add revision previous content and homework
-        beginner_level_bool = self.model.call(
-            user_prompt=f"Return 'True' if the following level is very low beginner level and a foreign language "
-                        f"student cannot be expected to read the language yet: {user_level}, otherwise return 'False'.",
-            system_prompt=f"You are a succinct assistant that replies using boolean values only.",
-            history=self.lesson_history
-        )
-        beginner_level_bool = True if 'true' in beginner_level_bool.lower() else False
+
+        beginner_level_bool = self.llm_service.is_beginner_level(user_level, self.lesson_history)
         # set the instruction language as the learning language if the user is not a beginner
         instruction_language = course_language if not beginner_level_bool else None
         instruction_language = user_data.get('learned_languages', ['english (default)']) if instruction_language is None else instruction_language
         instruction_language = instruction_language[0]
         revision_bool = False if not user_mastered + user_seen_content else True
+
         if self.current_lesson is None:
-            self.current_lesson = self.lesson_maker(course_language, user_limitation, lesson_elem,
-                                                    instruction_language, user_seen_content, user_mastered,
-                                                    user_level, revision_bool)
+            self.current_lesson = self.llm_service.lesson_maker(
+                course_language=course_language,
+                user_limitation=user_limitation,
+                lesson_elem=lesson_elem,
+                instruction_language=instruction_language,
+                user_seen_content=user_seen_content,
+                user_mastered=user_mastered,
+                user_level=user_level,
+                revision_bool=revision_bool,
+                lesson_history=self.lesson_history
+            )
         if self.next_lesson is None:
-            self.next_lesson = self.lesson_maker(course_language, user_limitation, lesson_elem,
-                                                 instruction_language, user_seen_content, user_mastered,
-                                                 user_level, revision_bool)
+            self.next_lesson = self.llm_service.lesson_maker(
+                course_language=course_language,
+                user_limitation=user_limitation,
+                lesson_elem=lesson_elem,
+                instruction_language=instruction_language,
+                user_seen_content=user_seen_content,
+                user_mastered=user_mastered,
+                user_level=user_level,
+                revision_bool=revision_bool,
+                lesson_history=self.lesson_history
+            )
 
     def _reset_reminded_flag(self):
         """
@@ -412,16 +332,8 @@ class TelegramBot(IBot):
             return
 
         try:
-            user_message_summary = self.model.call(
-                user_prompt=f"This is the answer to the question 'what language do you want to learn?'. Output the "
-                            f"standard name of the language along with any necessary details like regional "
-                            f"specificities/level/register/etc. It must be written in said language. (use as few words "
-                            f"as possible to summarize all concepts): {user_message}",
-                system_prompt="You are a succinct extractor and format standardizer.",
-            )
-            # TODO below comment + ask for level if in /setup only##############################################
+            user_message_summary = self.llm_service.get_language_summary(user_message)
             self.language = user_message_summary
-            # For multi-user, store in user_states: self.user_states[self.chat_id]['language'] = user_message_summary
             self.user_states[self.chat_id]['language'] = user_message_summary
             self.bot.send_message(self.chat_id, f"Great! You want to learn {user_message_summary}")
             logging.info(f"Language set for {self.chat_id}: {user_message_summary}")
@@ -450,25 +362,18 @@ class TelegramBot(IBot):
             return
 
         try:
-            user_message_summary = self.model.call(
-                user_prompt=f"This is the answer to the question 'what is your language proficiency/level?'. Output the "
-                            f"standard name of the level along with any necessary details (use as few words as possible "
-                            f"to summarize all concepts): {user_message}",
-                system_prompt="You are a succinct extractor and format standardizer."
-            )
+            user_message_summary = self.llm_service.get_level_summary(user_message)
             self.level = user_message_summary
             self.user_states[self.chat_id]['level'] = user_message_summary
             self.bot.send_message(self.chat_id, f"Understood, your level is {user_message_summary}\n\nGive me a second...")
             logging.info(f"Level set for {self.chat_id}: {user_message_summary}")
 
             # Infer mastered content based on level
-            infered_master_content = self.model.call(
-                user_prompt=f"Given a {self.user_states[self.chat_id]['level']} proficiency level in {self.user_states[self.chat_id]['language']}, make a list of all the content "
-                            f"that a foreign language student should already know?",
-                system_prompt="You are a succinct assistant."
+            self.seen_content = self.llm_service.infer_seen_content(
+                self.user_states[self.chat_id]['level'],
+                self.user_states[self.chat_id]['language']
             )
-            self.seen_content = [infered_master_content]
-            self.user_states[self.chat_id]['seen_content'] = [infered_master_content]
+            self.user_states[self.chat_id]['seen_content'] = self.seen_content
             self._clean_mastered()  # Ensure this operates on user-specific data if needed
             logging.info(f"Inferred seen content for {self.chat_id}.")
 
@@ -495,14 +400,7 @@ class TelegramBot(IBot):
             self.bot.send_message(self.chat_id, "Please provide a lesson preference or type 'no'.")
             return
         try:
-            llm_output = self.model.call(
-                user_prompt=f"This is the answer to the question 'about what do you want to learn?'. If it says 'no' it "
-                            f"means 'start from the beginning' Output a curriculum lesson name that matches it and any "
-                            f"details specified (use as few words as possible to summarize all concepts): {user_message}",
-                system_prompt="You are a succinct extractor and format standardizer. "
-                              "The beginner introduction class should "
-                              f"cover the language writing system and general orthography."
-            )
+            llm_output = self.llm_service.get_lesson_name(user_message)
             llm_output_converted = telegramify_markdown.markdownify(
                 llm_output,
                 max_line_length=None,
@@ -565,6 +463,7 @@ class TelegramBot(IBot):
             self.bot.send_message(self.chat_id, "Invalid choice. Please type 'yes' or 'no'.")
             self.bot.register_next_step_handler(message, self._process_optional_questions_choice)  # Ask again
             logging.warning(f"Invalid optional questions choice from {self.chat_id}: {user_choice}. Asking again.")
+
 
     def _process_learned_languages_input(self, message: telebot.types.Message) -> None:
         """
